@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DDPAI 行車紀錄器</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #131a22;
+    --panel-2: #182230;
+    --line: #22303f;
+    --text: #e6edf3;
+    --dim: #8b9bb0;
+    --accent: #38bdf8;
+    --good: #34d399;
+    --warn: #fbbf24;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", "PingFang HK", "Noto Sans TC", sans-serif;
+    font-size: 15px; line-height: 1.5;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 14px 20px; background: rgba(11,15,20,.92);
+    border-bottom: 1px solid var(--line); backdrop-filter: blur(6px);
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: .3px; }
+  .pill {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--dim); background: var(--panel);
+  }
+  .pill.online { color: var(--good); border-color: #1c4b3a; background: #10281f; }
+  .pill.offline { color: var(--bad); border-color: #4b1f22; background: #2a1214; }
+  .grow { flex: 1; }
+  input, button, select {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
+  }
+  input { width: 150px; }
+  button { cursor: pointer; transition: .15s; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: #0e3a52; border-color: #1b5a7d; color: #bfe9ff; }
+  main { padding: 20px; max-width: 1180px; margin: 0 auto; }
+
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 16px 18px;
+  }
+  .card h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--dim); margin: 0 0 12px; font-weight: 600;
+  }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 14px; }
+  .row span:first-child { color: var(--dim); }
+  .row span:last-child { text-align: right; word-break: break-all; }
+  .bar { height: 8px; border-radius: 999px; background: #0d1620; overflow: hidden; margin: 10px 0 6px; }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, #38bdf8, #818cf8); }
+
+  .tabs { display: flex; gap: 6px; margin: 22px 0 12px; flex-wrap: wrap; }
+  .tab {
+    padding: 7px 14px; border-radius: 9px; border: 1px solid var(--line);
+    background: transparent; color: var(--dim); font-size: 14px;
+  }
+  .tab.active { background: var(--panel); color: var(--text); border-color: #2b4258; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 9px 8px; text-align: left; border-bottom: 1px solid #1a2532; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; letter-spacing: .5px; }
+  td.name { font-variant-numeric: tabular-nums; word-break: break-all; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  .actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .actions button { padding: 4px 10px; font-size: 13px; }
+  .empty { color: var(--dim); padding: 26px 8px; text-align: center; }
+
+  #banner {
+    display: none; margin: 0 0 14px; padding: 11px 14px; border-radius: 10px;
+    background: #2a1214; border: 1px solid #4b1f22; color: #ffd7d7; font-size: 14px;
+  }
+  #banner.show { display: block; }
+  #banner.info { background: #0f2534; border-color: #1b4a63; color: #cfeaff; }
+
+  dialog {
+    border: 1px solid var(--line); border-radius: 14px; background: var(--panel);
+    padding: 0; width: min(960px, 94vw); color: var(--text);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.72); }
+  dialog video { width: 100%; display: block; border-radius: 14px 14px 0 0; background: #000; max-height: 70vh; }
+  dialog .bar2 { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; gap: 10px; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; color: #9ecbff; }
+  pre { margin: 0; white-space: pre-wrap; font-size: 12.5px; color: #b8c7d9; max-height: 46vh; overflow: auto; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--dim); }
+  .dot.ok { background: var(--good); } .dot.no { background: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>DDPAI 行車紀錄器</h1>
+  <span id="status" class="pill"><span class="dot"></span>檢查中</span>
+  <span class="grow"></span>
+  <input id="host" placeholder="193.168.0.1" autocomplete="off" />
+  <button id="connect">連線</button>
+  <button id="refresh">重新整理</button>
+</header>
+
+<main>
+  <div id="banner"></div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>設備資訊</h2>
+      <div class="row"><span>位址</span><span id="i-host">—</span></div>
+      <div class="row"><span>型號</span><span id="i-model">—</span></div>
+      <div class="row"><span>名稱</span><span id="i-nick">—</span></div>
+      <div class="row"><span>韌體</span><span id="i-ver">—</span></div>
+      <div class="row"><span>序號</span><span id="i-sn">—</span></div>
+    </section>
+    <section class="card">
+      <h2>儲存空間</h2>
+      <div class="bar"><i id="sd-bar" style="width:0%"></i></div>
+      <div class="row"><span>已用</span><span id="sd-used">—</span></div>
+      <div class="row"><span>可用</span><span id="sd-free">—</span></div>
+      <div class="row"><span>總容量</span><span id="sd-total">—</span></div>
+    </section>
+    <section class="card">
+      <h2>即時影像</h2>
+      <div class="row"><span>RTSP 網址</span><span id="rtsp" style="font-size:12.5px">—</span></div>
+      <div class="row"><span>提示</span><span style="font-size:12.5px;color:var(--dim)">用 VLC 開啟即可看直播</span></div>
+    </section>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="files">錄影</button>
+    <button class="tab" data-tab="events">事件</button>
+    <button class="tab" data-tab="local">已下載</button>
+    <button class="tab" data-tab="doctor">診斷</button>
+  </div>
+
+  <section class="card">
+    <div id="pane-files"></div>
+    <div id="pane-events" hidden></div>
+    <div id="pane-local" hidden></div>
+    <div id="pane-doctor" hidden><pre id="doctor-out">按「重新整理」載入診斷。</pre></div>
+  </section>
+</main>
+
+<dialog id="player">
+  <video id="video" controls playsinline></video>
+  <div class="bar2">
+    <code id="player-name"></code>
+    <span class="actions">
+      <button id="player-dl">下載本片</button>
+      <button id="player-close">關閉</button>
+    </span>
+  </div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { tab: "files", files: [], events: [], current: null };
+
+function banner(message, kind = "error") {
+  const el = $("banner");
+  if (!message) { el.className = ""; el.textContent = ""; return; }
+  el.textContent = message;
+  el.className = "show" + (kind === "info" ? " info" : "");
+}
+
+async function api(path, options) {
+  const res = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, options));
+  let payload = null;
+  try { payload = await res.json(); } catch (e) { payload = null; }
+  if (!res.ok || (payload && payload.ok === false)) {
+    const msg = (payload && payload.error) || ("HTTP " + res.status);
+    throw new Error(msg);
+  }
+  return payload ? payload.data : null;
+}
+
+function setStatus(text, cls) {
+  const el = $("status");
+  el.className = "pill " + (cls || "");
+  el.innerHTML = '<span class="dot ' + (cls === "online" ? "ok" : cls === "offline" ? "no" : "") + '"></span>' + text;
+}
+
+function fmtSize(bytes) {
+  if (bytes === null || bytes === undefined) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = bytes, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return v.toFixed(1) + " " + units[i];
+}
+
+function fmtDur(sec) {
+  if (sec === null || sec === undefined) return "—";
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`
+               : `${m}:${String(s).padStart(2,"0")}`;
+}
+
+async function loadHealth() {
+  try {
+    const h = await api("/api/health");
+    setStatus("已連線 " + h.host, "online");
+    $("host").value = h.host || $("host").value;
+    return h;
+  } catch (err) {
+    setStatus("未連線", "offline");
+    banner("連不上相機：" + err.message + "　請確認電腦 Wi-Fi 已連上 DDPAI_XXXX 後按「連線」。");
+    return null;
+  }
+}
+
+async function loadInfo() {
+  try {
+    const data = await api("/api/info");
+    const info = data.info || {}, st = data.storage, human = data.storage_human || {};
+    $("i-host").textContent = data.host || "—";
+    $("i-model").textContent = info.model || "—";
+    $("i-nick").textContent = info.nickname || "—";
+    $("i-ver").textContent = info.version || "—";
+    $("i-sn").textContent = info.sn || "—";
+    $("sd-used").textContent = human.used ? `${human.used}（${st.used_percent ?? "?"}%）` : "—";
+    $("sd-free").textContent = human.free || "—";
+    $("sd-total").textContent = human.total || "—";
+    $("sd-bar").style.width = (st && st.used_percent ? st.used_percent : 0) + "%";
+  } catch (err) {
+    /* 資訊失敗不擋其他區塊 */
+  }
+  try {
+    const rtsp = await api("/api/rtsp");
+    $("rtsp").textContent = rtsp.url;
+  } catch (err) { $("rtsp").textContent = "—"; }
+}
+
+function fileTable(rows, kind) {
+  if (!rows || !rows.length) return '<div class="empty">沒有檔案</div>';
+  const head = `<tr><th>檔名</th><th>開始時間</th><th class="num">長度</th><th class="num">大小</th><th class="num">操作</th></tr>`;
+  const body = rows.map((f, i) => `
+    <tr>
+      <td class="name">${f.basename}</td>
+      <td>${f.start || "—"}</td>
+      <td class="num">${fmtDur(f.duration)}</td>
+      <td class="num">${fmtSize(f.size)}</td>
+      <td class="num"><span class="actions">
+        <button data-play="${encodeURIComponent(f.name)}" data-idx="${i}" data-kind="${kind}">播放</button>
+        <button data-dl="${encodeURIComponent(f.name)}">下載</button>
+      </span></td>
+    </tr>`).join("");
+  return `<table>${head}${body}</table>`;
+}
+
+async function loadFiles() {
+  $("pane-files").innerHTML = '<div class="empty">讀取中…</div>';
+  try {
+    state.files = await api("/api/files");
+    $("pane-files").innerHTML = fileTable(state.files, "files");
+    banner(null);
+  } catch (err) {
+    $("pane-files").innerHTML = '<div class="empty">讀不到錄影清單</div>';
+    banner("讀取錄影清單失敗：" + err.message);
+  }
+}
+
+async function loadEvents() {
+  $("pane-events").innerHTML = '<div class="empty">讀取中…</div>';
+  try {
+    state.events = await api("/api/events");
+    $("pane-events").innerHTML = fileTable(state.events, "events");
+  } catch (err) {
+    $("pane-events").innerHTML = '<div class="empty">讀不到事件清單</div>';
+    banner("讀取事件清單失敗：" + err.message);
+  }
+}
+
+async function loadLocal() {
+  $("pane-local").innerHTML = '<div class="empty">讀取中…</div>';
+  try {
+    const data = await api("/api/downloaded");
+    if (!data.files.length) {
+      $("pane-local").innerHTML = '<div class="empty">還沒有下載任何檔案<br><code>' + data.dir + '</code></div>';
+      return;
+    }
+    const rows = data.files.map(f => `
+      <tr><td class="name">${f.name}</td><td class="num">${f.size}</td>
+      <td class="num"><a href="/api/local/${encodeURIComponent(f.name)}" download><button>存檔</button></a></td></tr>`).join("");
+    $("pane-local").innerHTML =
+      `<div class="empty" style="text-align:left;padding:0 0 10px"><code>${data.dir}</code></div>
+       <table><tr><th>檔名</th><th class="num">大小</th><th class="num">操作</th></tr>${rows}</table>`;
+  } catch (err) {
+    $("pane-local").innerHTML = '<div class="empty">讀取失敗</div>';
+  }
+}
+
+async function loadDoctor() {
+  $("doctor-out").textContent = "探測中…";
+  try {
+    const report = await api("/api/doctor");
+    $("doctor-out").textContent = JSON.stringify(report, null, 2);
+  } catch (err) {
+    $("doctor-out").textContent = "診斷失敗：" + err.message;
+  }
+}
+
+function play(name) {
+  state.current = name;
+  $("player-name").textContent = decodeURIComponent(name);
+  const video = $("video");
+  video.src = "/api/media/" + name;
+  $("player").showModal();
+  video.play().catch(() => {});
+}
+
+async function download(names) {
+  banner("正在從相機下載，請稍候…", "info");
+  try {
+    const result = await api("/api/download", { method: "POST", body: JSON.stringify({ names }) });
+    const failed = Object.entries(result).filter(([, v]) => String(v).startsWith("ERROR"));
+    banner(failed.length ? `部分失敗：${failed.map(([k, v]) => k + " → " + v).join("; ")}`
+                         : `已下載 ${Object.keys(result).length} 個檔案到本機`, failed.length ? "error" : "info");
+    state.tab = "local"; renderTabs();
+  } catch (err) {
+    banner("下載失敗：" + err.message);
+  }
+}
+
+function renderTabs() {
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === state.tab));
+  for (const name of ["files", "events", "local", "doctor"]) {
+    $("pane-" + name).hidden = name !== state.tab;
+  }
+  if (state.tab === "files") loadFiles();
+  if (state.tab === "events") loadEvents();
+  if (state.tab === "local") loadLocal();
+  if (state.tab === "doctor") loadDoctor();
+}
+
+document.addEventListener("click", (event) => {
+  const playBtn = event.target.closest("[data-play]");
+  if (playBtn) { play(playBtn.dataset.play); return; }
+  const dlBtn = event.target.closest("[data-dl]");
+  if (dlBtn) { download([dlBtn.dataset.dl]); return; }
+  const tab = event.target.closest(".tab");
+  if (tab) { state.tab = tab.dataset.tab; renderTabs(); }
+});
+
+$("player-close").onclick = () => {
+  const video = $("video");
+  video.pause(); video.removeAttribute("src"); video.load();
+  $("player").close();
+};
+$("player-dl").onclick = () => { if (state.current) download([state.current]); };
+$("player").addEventListener("close", () => {
+  const video = $("video");
+  video.pause(); video.removeAttribute("src"); video.load();
+});
+
+$("refresh").onclick = async () => {
+  banner(null);
+  if (await loadHealth()) { loadInfo(); renderTabs(); }
+};
+
+$("connect").onclick = async () => {
+  const host = $("host").value.trim();
+  if (!host) return;
+  banner("正在連線 " + host + "…", "info");
+  try {
+    await api("/api/host", { method: "POST", body: JSON.stringify({ host }) });
+    banner(null);
+    if (await loadHealth()) { loadInfo(); renderTabs(); }
+  } catch (err) {
+    setStatus("未連線", "offline");
+    banner("連線失敗：" + err.message);
+  }
+};
+
+(async function init() {
+  if (await loadHealth()) { loadInfo(); loadFiles(); }
+  else { $("pane-files").innerHTML = '<div class="empty">相機未連線</div>'; }
+  setInterval(loadHealth, 20000);
+})();
+</script>
+</body>
+</html>

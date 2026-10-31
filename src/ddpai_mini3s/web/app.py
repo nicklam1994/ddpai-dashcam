@@ -1,0 +1,275 @@
+"""FastAPI 後端 + 單頁網頁儀表板。
+
+設計原則：
+  * 不打包前端（沒有 node 也能跑）：單一 index.html + 原生 JS
+  * 影片播放走 Range 轉發，可直接拖動時間軸
+  * 所有 ddpai 錯誤都回 502 + 可讀訊息，前端顯示在 banner
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import requests
+from contextlib import asynccontextmanager
+
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+
+from ..client import Camera, CameraError, CameraUnreachable
+from ..models import human_size
+from .. import discovery
+from ..transport import STRATEGIES
+
+log = logging.getLogger("ddpai.web")
+
+STATIC_DIR = Path(__file__).parent / "static"
+DOWNLOAD_DIR = Path(os.environ.get("DDPAI_DOWNLOAD_DIR", "downloads")).expanduser()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    reset_camera()
+
+
+app = FastAPI(title="DDPAI 行車紀錄器", version="0.1.0", lifespan=lifespan)
+
+_lock = threading.Lock()
+_camera: Optional[Camera] = None
+
+
+# ── 相機取得 ───────────────────────────────────────────────────
+def get_camera(reconnect: bool = False) -> Camera:
+    global _camera
+    with _lock:
+        if _camera is not None and not reconnect:
+            return _camera
+        if _camera is not None:
+            _camera.close()
+        _camera = Camera(
+            host=os.environ.get("DDPAI_HOST") or None,
+            password=os.environ.get("DDPAI_PASSWORD", ""),
+            timeout=float(os.environ.get("DDPAI_TIMEOUT", "8")),
+        )
+        return _camera
+
+
+def reset_camera() -> None:
+    global _camera
+    with _lock:
+        if _camera is not None:
+            _camera.close()
+        _camera = None
+
+
+def fail(exc: Exception, status: int = 502) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"ok": False, "error": str(exc)})
+
+
+def ok(payload: Any) -> Dict[str, Any]:
+    return {"ok": True, "data": payload}
+
+
+# ── 頁面 ───────────────────────────────────────────────────────
+@app.get("/", response_class=HTMLResponse)
+def index() -> HTMLResponse:
+    page = STATIC_DIR / "index.html"
+    if not page.exists():
+        return HTMLResponse("<h1>找不到前端檔案</h1>", status_code=500)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+# ── API ────────────────────────────────────────────────────────
+@app.get("/api/health")
+def health() -> Any:
+    try:
+        camera = get_camera()
+        info = camera.info()
+        return ok({
+            "host": camera.host,
+            "strategy": camera.transport.strategy.id if camera.transport.strategy else None,
+            "model": info.model,
+            "version": info.version,
+        })
+    except (CameraError, CameraUnreachable, Exception) as exc:  # noqa: BLE001
+        return fail(exc, status=503)
+
+
+@app.get("/api/info")
+def api_info() -> Any:
+    try:
+        camera = get_camera()
+        info = camera.info()
+        storage = camera.storage()
+        return ok({
+            "info": info.to_dict(),
+            "storage": storage.to_dict() if storage else None,
+            "storage_human": {
+                "total": human_size(storage.total_bytes) if storage else None,
+                "free": human_size(storage.free_bytes) if storage else None,
+                "used": human_size(storage.used_bytes) if storage else None,
+            },
+            "host": camera.host,
+        })
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.get("/api/files")
+def api_files(rear: bool = False) -> Any:
+    try:
+        files = get_camera().files(rear=rear)
+        return ok([f.to_dict() for f in files])
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.get("/api/events")
+def api_events(rear: bool = False) -> Any:
+    try:
+        events = get_camera().events(rear=rear)
+        return ok([e.to_dict() for e in events])
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.get("/api/doctor")
+def api_doctor(matrix: bool = False) -> Any:
+    try:
+        camera = get_camera()
+        return ok(camera.doctor(full_matrix=matrix))
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.get("/api/hosts")
+def api_hosts() -> Any:
+    return ok({
+        "candidates": discovery.candidate_hosts(),
+        "wsl": discovery.is_wsl(),
+        "windows_wifi": discovery.windows_wifi_gateways(),
+        "current": (get_camera().host if _camera else None),
+    })
+
+
+@app.post("/api/host")
+def api_set_host(payload: Dict[str, str] = Body(...)) -> Any:
+    host = (payload or {}).get("host", "").strip()
+    if not host:
+        return fail(ValueError("host 不可為空"), status=400)
+    os.environ["DDPAI_HOST"] = host
+    reset_camera()
+    try:
+        camera = get_camera()
+        camera.connect()
+        return ok({"host": camera.host})
+    except Exception as exc:  # noqa: BLE001
+        reset_camera()
+        return fail(exc)
+
+
+@app.post("/api/reconnect")
+def api_reconnect() -> Any:
+    reset_camera()
+    try:
+        camera = get_camera()
+        camera.connect()
+        return ok({"host": camera.host})
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.get("/api/raw")
+def api_raw(cmd: str, request: Request) -> Any:
+    params = {k: v for k, v in request.query_params.items() if k != "cmd"}
+    try:
+        return ok(get_camera().raw(cmd, params or None))
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+# ── 影片：播放（Range 轉發）─────────────────────────────────────
+@app.get("/api/media/{name:path}")
+def api_media(name: str, request: Request) -> Response:
+    try:
+        camera = get_camera()
+        upstream = camera.transport.open_stream(name, range_header=request.headers.get("range"))
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+    if upstream.status_code not in (200, 206):
+        upstream.close()
+        return JSONResponse(
+            status_code=502,
+            content={"ok": False, "error": f"相機回應 HTTP {upstream.status_code}"},
+        )
+
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-store"}
+    for key in ("Content-Length", "Content-Range"):
+        if key in upstream.headers:
+            headers[key] = upstream.headers[key]
+
+    def iterfile():
+        try:
+            for chunk in upstream.iter_content(chunk_size=256 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    media_type = "video/mp4" if name.lower().endswith((".mp4", ".mov")) else "application/octet-stream"
+    return StreamingResponse(iterfile(), status_code=upstream.status_code,
+                             media_type=media_type, headers=headers)
+
+
+# ── 下載到本機 ─────────────────────────────────────────────────
+@app.post("/api/download")
+def api_download(payload: Dict[str, Any] = Body(...)) -> Any:
+    names = payload.get("names") or ([payload["name"]] if payload.get("name") else [])
+    if not names:
+        return fail(ValueError("未指定檔名"), status=400)
+    try:
+        camera = get_camera()
+        results = camera.download_many(names, dest_dir=DOWNLOAD_DIR)
+        return ok(results)
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.get("/api/downloaded")
+def api_downloaded() -> Any:
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for path in sorted(DOWNLOAD_DIR.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if path.is_file() and not path.name.endswith(".part"):
+            entries.append({
+                "name": path.name,
+                "size": human_size(path.stat().st_size),
+                "bytes": path.stat().st_size,
+            })
+    return ok({"dir": str(DOWNLOAD_DIR.resolve()), "files": entries})
+
+
+@app.get("/api/local/{name:path}")
+def api_local(name: str) -> Response:
+    path = (DOWNLOAD_DIR / name).resolve()
+    try:
+        path.relative_to(DOWNLOAD_DIR.resolve())
+    except ValueError:
+        return fail(ValueError("非法路徑"), status=400)
+    if not path.exists():
+        return fail(FileNotFoundError(name), status=404)
+    return FileResponse(path)
+
+
+@app.get("/api/rtsp")
+def api_rtsp(rear: bool = False) -> Any:
+    try:
+        return ok({"url": get_camera().rtsp_url(rear=rear)})
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
