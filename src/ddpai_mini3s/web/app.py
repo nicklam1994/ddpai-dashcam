@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -30,6 +31,7 @@ log = logging.getLogger("ddpai.web")
 STATIC_DIR = Path(__file__).parent / "static"
 DOWNLOAD_DIR = Path(os.environ.get("DDPAI_DOWNLOAD_DIR", "downloads")).expanduser()
 RECORD_DIR = Path(os.environ.get("DDPAI_RECORD_DIR", "recordings")).expanduser()
+PHOTO_DIR = Path(os.environ.get("DDPAI_PHOTO_DIR", "photos")).expanduser()
 
 
 @asynccontextmanager
@@ -281,15 +283,126 @@ _live_slots = threading.Semaphore(2)
 
 
 @app.get("/api/snapshot.jpg")
-def api_snapshot(width: int = Query(1280, ge=320, le=2560)) -> Response:
-    """抓一張即時照片（直接回 JPEG，前端可當 <img src> 用）。"""
+def api_snapshot(width: int = Query(1280, ge=320, le=2560),
+                 save: bool = True) -> Response:
+    """抓一張即時照片。預設同時存進本機相冊（photos/）。"""
     try:
         camera = get_camera()
         frame = live.grab_frame(camera.rtsp_url(), width=width)
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=502, content={"ok": False, "error": str(exc)})
-    return Response(content=frame, media_type="image/jpeg",
-                    headers={"Cache-Control": "no-store"})
+
+    headers = {"Cache-Control": "no-store"}
+    if save:
+        try:
+            name = save_photo(frame)
+            headers["X-Photo-Name"] = name
+        except OSError as exc:
+            log.debug("照片存檔失敗：%s", exc)
+    return Response(content=frame, media_type="image/jpeg", headers=headers)
+
+
+def save_photo(frame: bytes, prefix: str = "ddpai") -> str:
+    """把 JPEG 寫進相冊目錄，回傳檔名（同名自動加序號）。"""
+    PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    target = PHOTO_DIR / f"{prefix}_{stamp}.jpg"
+    suffix = 1
+    while target.exists():
+        target = PHOTO_DIR / f"{prefix}_{stamp}_{suffix}.jpg"
+        suffix += 1
+    target.write_bytes(frame)
+    return target.name
+
+
+def _safe_child(base: Path, name: str) -> Path:
+    path = (base / name).resolve()
+    path.relative_to(base.resolve())  # 路徑穿越會拋 ValueError
+    return path
+
+
+@app.get("/api/photos")
+def api_photos() -> Any:
+    """相冊清單（新的排前面）。"""
+    PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    items = []
+    for path in PHOTO_DIR.glob("*.jpg"):
+        stat = path.stat()
+        items.append({
+            "name": path.name,
+            "bytes": stat.st_size,
+            "size": human_size(stat.st_size),
+            "mtime": int(stat.st_mtime),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            "url": f"/api/photos/{path.name}",
+        })
+    items.sort(key=lambda item: item["mtime"], reverse=True)
+    return ok({"dir": str(PHOTO_DIR.resolve()), "photos": items})
+
+
+@app.get("/api/photos/{name}")
+def api_photo_file(name: str) -> Response:
+    try:
+        path = _safe_child(PHOTO_DIR, name)
+    except ValueError:
+        return fail(ValueError("非法路徑"), status=400)
+    if not path.exists():
+        return fail(FileNotFoundError(name), status=404)
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.delete("/api/photos/{name}")
+def api_photo_delete(name: str) -> Any:
+    try:
+        path = _safe_child(PHOTO_DIR, name)
+    except ValueError:
+        return fail(ValueError("非法路徑"), status=400)
+    if not path.exists():
+        return fail(FileNotFoundError(name), status=404)
+    path.unlink()
+    return ok({"deleted": name})
+
+
+@app.get("/api/captures")
+def api_captures() -> Any:
+    """相冊總覽：照片 + 錄影片段（同一個畫面用）。"""
+    PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    RECORD_DIR.mkdir(parents=True, exist_ok=True)
+
+    photos = []
+    for path in PHOTO_DIR.glob("*.jpg"):
+        stat = path.stat()
+        photos.append({
+            "kind": "photo",
+            "name": path.name,
+            "bytes": stat.st_size,
+            "size": human_size(stat.st_size),
+            "mtime": int(stat.st_mtime),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            "url": f"/api/photos/{path.name}",
+        })
+
+    records = []
+    for path in RECORD_DIR.glob("*.mp4"):
+        stat = path.stat()
+        records.append({
+            "kind": "video",
+            "name": path.name,
+            "bytes": stat.st_size,
+            "size": human_size(stat.st_size),
+            "mtime": int(stat.st_mtime),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            "url": f"/api/records/{path.name}",
+        })
+
+    items = sorted(photos + records, key=lambda item: item["mtime"], reverse=True)
+    return ok({
+        "photo_dir": str(PHOTO_DIR.resolve()),
+        "record_dir": str(RECORD_DIR.resolve()),
+        "items": items,
+        "photo_count": len(photos),
+        "video_count": len(records),
+    })
 
 
 @app.get("/api/live.mjpg")
@@ -360,3 +473,16 @@ def api_record_file(name: str) -> Response:
     if not path.exists():
         return fail(FileNotFoundError(name), status=404)
     return FileResponse(path, media_type="video/mp4", filename=name)
+
+
+@app.delete("/api/records/{name}")
+def api_record_delete(name: str) -> Any:
+    path = (RECORD_DIR / name).resolve()
+    try:
+        path.relative_to(RECORD_DIR.resolve())
+    except ValueError:
+        return fail(ValueError("非法路徑"), status=400)
+    if not path.exists():
+        return fail(FileNotFoundError(name), status=404)
+    path.unlink()
+    return ok({"deleted": name})

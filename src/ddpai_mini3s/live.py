@@ -100,8 +100,9 @@ def grab_frame(rtsp_url: str, width: int = 1280, timeout: float = 25.0) -> bytes
 
     with _session_lock:
         frame, err = attempt()
-        if not frame.startswith(JPEG_SOI) and any(hint in err.lower() for hint in BUSY_HINTS):
-            log.debug("RTSP 疑似被佔用，清理後重試：%s", err.strip()[:120])
+        if not frame.startswith(JPEG_SOI):
+            # 不管是 session 被佔用、還是相機剛從舊連線恢復，一律清理後重試一次
+            log.debug("抓圖失敗，清理 ffmpeg 後重試：%s", err.strip()[:120])
             kill_stale()
             time.sleep(1.0)
             frame, err = attempt()

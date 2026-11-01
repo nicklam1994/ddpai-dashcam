@@ -78,6 +78,7 @@ ddpai reboot -y            # 重啟相機
 
 - 連線狀態、設備資訊、SD 卡用量條
 - **即時畫面**：MJPEG 直播（瀏覽器直接看，不用 VLC）、一鍵拍照、錄 10 秒短片
+- **本地相冊**：拍照與錄影自動存到本機（`photos/`、`recordings/`），縮圖牆可直接放大檢視、下載、刪除
 - 錄影／事件清單，可直接在瀏覽器播放（後端做 Range 轉發，能拖時間軸）
 - 一鍵下載到電腦
 - 診斷頁（等同 `ddpai doctor`）
@@ -88,11 +89,15 @@ ddpai reboot -y            # 重啟相機
 | 端點 | 用途 |
 | --- | --- |
 | `GET /api/live.mjpg` | MJPEG 直播串流（`<img src>` 即可） |
-| `GET /api/snapshot.jpg` | 抓一張即時照片（回 JPEG） |
+| `GET /api/snapshot.jpg` | 抓一張即時照片（回 JPEG，並存進相冊；`?save=false` 只回不存） |
 | `POST /api/record` `{"seconds":10}` | 錄短片並存到 `recordings/` |
-| `GET /api/media/<檔名>` | 播放錄影（支援 Range） |
-| `POST /api/download` `{"names":[...]}` | 下載到本機 `downloads/` |
+| `GET /api/captures` | 相冊總覽：照片 + 錄影，按時間倒序 |
+| `GET /api/photos` · `GET/DELETE /api/photos/<檔名>` | 相冊照片列表／檢視／刪除 |
+| `GET/DELETE /api/records/<檔名>` | 錄影片段檢視／刪除 |
+| `GET /api/media/<檔名>` | 播放相機上的錄影（支援 Range） |
+| `POST /api/download` `{"names":[...]}` | 把相機檔案下載到本機 `downloads/` |
 
+相冊位置可用 `DDPAI_PHOTO_DIR` / `DDPAI_RECORD_DIR` 覆寫，預設在專案目錄下（已加進 `.gitignore`）。
 直播需要 `ffmpeg`（`sudo apt install ffmpeg`）；沒有 ffmpeg 時其他功能照常。
 
 ---

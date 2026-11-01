@@ -90,6 +90,40 @@
   .livebtns { display: flex; gap: 8px; margin-top: 10px; }
   .livebtns button { flex: 1; padding: 8px 6px; font-size: 13.5px; }
 
+  /* 相冊 */
+  .galhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .galhead .meta { color: var(--dim); font-size: 12.5px; }
+  .galgrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .thumb {
+    position: relative; border-radius: 10px; overflow: hidden;
+    background: #05080b; border: 1px solid #1a2532; cursor: pointer;
+    aspect-ratio: 16 / 9;
+  }
+  .thumb img, .thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .badge {
+    position: absolute; top: 6px; left: 6px; font-size: 11px; padding: 1px 7px;
+    border-radius: 5px; background: rgba(0,0,0,.66); color: #cfe6ff;
+  }
+  .thumb .cap {
+    position: absolute; inset: auto 0 0 0; padding: 18px 8px 6px;
+    background: linear-gradient(transparent, rgba(0,0,0,.82));
+    font-size: 11.5px; color: #dbe7f3; display: flex; justify-content: space-between; gap: 6px;
+  }
+  .thumb .cap .sz { color: #8fa8bf; white-space: nowrap; }
+  .thumb .del {
+    position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; padding: 0;
+    border-radius: 6px; background: rgba(0,0,0,.6); border: 1px solid #3d2027;
+    color: #ff9c9c; font-size: 13px; line-height: 1; opacity: 0; transition: .15s;
+  }
+  .thumb:hover .del { opacity: 1; }
+  .thumb .del:hover { background: #4b1f22; color: #fff; }
+  .thumb .cap.right { justify-content: flex-end; }
+  .thumb .playicon {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: 22px; color: rgba(255,255,255,.78);
+    text-shadow: 0 2px 10px rgba(0,0,0,.8); pointer-events: none;
+  }
+
   #banner {
     display: none; margin: 0 0 14px; padding: 11px 14px; border-radius: 10px;
     background: #2a1214; border: 1px solid #4b1f22; color: #ffd7d7; font-size: 14px;
@@ -155,14 +189,16 @@
   </div>
 
   <div class="tabs">
-    <button class="tab active" data-tab="files">錄影</button>
+    <button class="tab active" data-tab="gallery">相冊</button>
+    <button class="tab" data-tab="files">錄影</button>
     <button class="tab" data-tab="events">事件</button>
     <button class="tab" data-tab="local">已下載</button>
     <button class="tab" data-tab="doctor">診斷</button>
   </div>
 
   <section class="card">
-    <div id="pane-files"></div>
+    <div id="pane-gallery"></div>
+    <div id="pane-files" hidden></div>
     <div id="pane-events" hidden></div>
     <div id="pane-local" hidden></div>
     <div id="pane-doctor" hidden><pre id="doctor-out">按「重新整理」載入診斷。</pre></div>
@@ -180,9 +216,20 @@
   </div>
 </dialog>
 
+<dialog id="viewer">
+  <img id="viewer-img" alt="" />
+  <div class="bar2">
+    <code id="viewer-name"></code>
+    <span class="actions">
+      <button id="viewer-dl">下載</button>
+      <button id="viewer-close">關閉</button>
+    </span>
+  </div>
+</dialog>
+
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { tab: "files", files: [], events: [], current: null };
+const state = { tab: "gallery", files: [], events: [], current: null, captures: [] };
 
 function banner(message, kind = "error") {
   const el = $("banner");
@@ -295,13 +342,19 @@ async function snap() {
       throw new Error(err.error || "拍照失敗");
     }
     const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "");
-    const a = document.createElement("a");
-    a.href = url; a.download = `ddpai_${stamp}.jpg`;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-    banner("已拍一張照片並存到本機下載", "info");
+    const saved = res.headers.get("X-Photo-Name");
+    // 存到伺服器相冊後就不用再塞進瀏覽器下載；只有存檔失敗時才退回下載
+    if (!saved) {
+      const url = URL.createObjectURL(blob);
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "");
+      const a = document.createElement("a");
+      a.href = url; a.download = `ddpai_${stamp}.jpg`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }
+    banner(saved ? `已存入相冊：${saved}` : "相機相冊存檔失敗，已改為下載到本機", saved ? "info" : "error");
+    if (state.tab === "gallery") loadGallery();
+    else { state.tab = "gallery"; renderTabs(); }
   } catch (err) {
     banner("拍照失敗：" + err.message);
   }
@@ -313,8 +366,8 @@ async function recordClip() {
   banner("錄影 10 秒中，請稍候…", "info");
   try {
     const data = await api("/api/record", { method: "POST", body: JSON.stringify({ seconds: 10 }) });
-    banner(`已錄好 ${data.seconds} 秒（${fmtSize(data.bytes)}），開始下載`, "info");
-    window.open(data.url, "_blank");
+    banner(`已錄好 ${data.seconds} 秒（${fmtSize(data.bytes)}），已存入相冊`, "info");
+    state.tab = "gallery"; renderTabs();
   } catch (err) {
     banner("錄影失敗：" + err.message);
   } finally {
@@ -393,9 +446,11 @@ async function loadDoctor() {
 
 function play(name) {
   state.current = name;
-  $("player-name").textContent = decodeURIComponent(name);
+  const decoded = decodeURIComponent(name);
+  $("player-name").textContent = decoded.split("/").pop();
   const video = $("video");
-  video.src = "/api/media/" + name;
+  // 支援兩種來源：相機上的檔案（檔名）與本機錄影（/api/records/xxx）
+  video.src = decoded.startsWith("/api/") ? decoded : "/api/media/" + decoded;
   $("player").showModal();
   video.play().catch(() => {});
 }
@@ -413,11 +468,72 @@ async function download(names) {
   }
 }
 
+async function loadGallery() {
+  $("pane-gallery").innerHTML = '<div class="empty">讀取中…</div>';
+  try {
+    const data = await api("/api/captures");
+    state.captures = data.items || [];
+    if (!state.captures.length) {
+      $("pane-gallery").innerHTML =
+        `<div class="empty">相冊還是空的<br>按上面「拍照」或「錄 10 秒」，內容會自動存到這裡<br>
+         <code>${data.photo_dir}</code></div>`;
+      return;
+    }
+    const cards = state.captures.map(item => {
+      const isPhoto = item.kind === "photo";
+      const media = isPhoto
+        ? `<img src="${item.url}?t=${item.mtime}" alt="${item.name}" loading="lazy">`
+        : `<video src="${item.url}#t=0.5" preload="metadata" muted playsinline></video>`;
+      // 影片畫面上已經有燒錄的 OSD 時間，左下角就不再重複顯示時間
+      const cap = isPhoto
+        ? `<div class="cap"><span>${item.time}</span><span class="sz">${item.size}</span></div>`
+        : `<div class="cap right"><span class="sz">${item.size}</span></div>`;
+      const playIcon = isPhoto ? "" : '<span class="playicon">▶</span>';
+      return `<div class="thumb" data-open="${item.kind}:${encodeURIComponent(item.name)}">
+        ${media}${playIcon}
+        <span class="badge">${isPhoto ? "照片" : "影片"}</span>
+        <button class="del" data-del="${item.kind}:${encodeURIComponent(item.name)}" title="刪除">✕</button>
+        ${cap}
+      </div>`;
+    }).join("");
+    $("pane-gallery").innerHTML =
+      `<div class="galhead">
+         <strong>本地相冊</strong>
+         <span class="meta">照片 ${data.photo_count} 張 · 影片 ${data.video_count} 段</span>
+         <span class="grow"></span>
+         <span class="meta"><code>${data.photo_dir}</code></span>
+       </div>
+       <div class="galgrid">${cards}</div>`;
+  } catch (err) {
+    $("pane-gallery").innerHTML = '<div class="empty">讀取相冊失敗</div>';
+    banner("讀取相冊失敗：" + err.message);
+  }
+}
+
+function openPhoto(name) {
+  $("viewer-name").textContent = name;
+  $("viewer-img").src = `/api/photos/${name}`;
+  $("viewer").showModal();
+}
+
+async function deleteCapture(kind, name) {
+  if (!confirm(`刪除 ${name}？`)) return;
+  const path = kind === "photo" ? `/api/photos/${name}` : `/api/records/${name}`;
+  try {
+    await api(path, { method: "DELETE" });
+    banner("已刪除 " + name, "info");
+    loadGallery();
+  } catch (err) {
+    banner("刪除失敗：" + err.message);
+  }
+}
+
 function renderTabs() {
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === state.tab));
-  for (const name of ["files", "events", "local", "doctor"]) {
+  for (const name of ["gallery", "files", "events", "local", "doctor"]) {
     $("pane-" + name).hidden = name !== state.tab;
   }
+  if (state.tab === "gallery") loadGallery();
   if (state.tab === "files") loadFiles();
   if (state.tab === "events") loadEvents();
   if (state.tab === "local") loadLocal();
@@ -425,6 +541,21 @@ function renderTabs() {
 }
 
 document.addEventListener("click", (event) => {
+  const delBtn = event.target.closest("[data-del]");
+  if (delBtn) {
+    event.stopPropagation();
+    const [kind, name] = delBtn.dataset.del.split(":");
+    deleteCapture(kind, decodeURIComponent(name));
+    return;
+  }
+  const openEl = event.target.closest("[data-open]");
+  if (openEl) {
+    const [kind, name] = openEl.dataset.open.split(":");
+    const decoded = decodeURIComponent(name);
+    if (kind === "photo") openPhoto(decoded);
+    else play("/api/records/" + decoded);
+    return;
+  }
   const playBtn = event.target.closest("[data-play]");
   if (playBtn) { play(playBtn.dataset.play); return; }
   const dlBtn = event.target.closest("[data-dl]");
@@ -441,6 +572,14 @@ $("player-close").onclick = () => {
 $("btn-live").onclick = toggleLive;
 $("btn-snap").onclick = snap;
 $("btn-rec").onclick = recordClip;
+$("viewer-close").onclick = () => { $("viewer-img").removeAttribute("src"); $("viewer").close(); };
+$("viewer-dl").onclick = () => {
+  const name = $("viewer-name").textContent;
+  if (!name) return;
+  const a = document.createElement("a");
+  a.href = `/api/photos/${name}`; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+};
 $("player-dl").onclick = () => { if (state.current) download([state.current]); };
 $("player").addEventListener("close", () => {
   const video = $("video");
@@ -467,8 +606,8 @@ $("connect").onclick = async () => {
 };
 
 (async function init() {
-  if (await loadHealth()) { loadInfo(); loadFiles(); }
-  else { $("pane-files").innerHTML = '<div class="empty">相機未連線</div>'; }
+  if (await loadHealth()) { loadInfo(); loadGallery(); }
+  else { $("pane-gallery").innerHTML = '<div class="empty">相機未連線（相冊仍可查看已拍的照片）</div>'; loadGallery(); }
   setInterval(loadHealth, 20000);
 })();
 </script>

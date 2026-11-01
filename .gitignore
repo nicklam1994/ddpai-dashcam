@@ -13,3 +13,4 @@ snapshot_*.jpg
 .DS_Store
 *.log
 recordings/
+photos/
