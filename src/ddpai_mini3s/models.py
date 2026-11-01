@@ -7,6 +7,7 @@ starttime / start / begintime……），所以所有解析都走「大小寫不
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
@@ -37,8 +38,30 @@ def _as_int(value: Any) -> Optional[int]:
             return None
 
 
-def _as_ts(value: Any) -> Optional[datetime]:
+_FILE_STAMP = re.compile(r"^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})")
+
+
+def _stamp_from_name(name: str) -> Optional[datetime]:
+    """從檔名取時間戳（`20261101124245_0060.mp4`）。
+
+    這是**最權威**的時間來源：相機把本地時間寫進檔名，而 API 的 epoch
+    欄位卻把同一個本地時間當成 UTC 回報（實測 Mini3 Pro 韌體 v7.1.0.48
+    的 epoch 比真實 UTC 早 8 小時），用 epoch 再轉時區就會多減 8 小時。
+    """
+    match = _FILE_STAMP.match((name or "").rsplit("/", 1)[-1])
+    if not match:
+        return None
+    try:
+        return datetime(*(int(part) for part in match.groups()))
+    except ValueError:
+        return None
+
+
+def _as_ts(value: Any, name: str = "") -> Optional[datetime]:
     """時間戳可能是秒、毫秒，或已格式化的字串。"""
+    from_name = _stamp_from_name(name)
+    if from_name:
+        return from_name
     if value is None:
         return None
     if isinstance(value, str):
@@ -58,7 +81,9 @@ def _as_ts(value: Any) -> Optional[datetime]:
     if stamp < 1_000_000_000:  # 明顯不是 Unix 秒
         return None
     try:
-        return datetime.fromtimestamp(stamp)
+        # 相機把本地時間當 UTC 回報，所以用 utcfromtimestamp 直接還原，
+        # 不要再加時區偏移（加了就會出現「顯示比檔名快 8 小時」）。
+        return datetime.utcfromtimestamp(stamp)
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -80,19 +105,27 @@ class CameraFile:
     @classmethod
     def from_raw(cls, raw: Dict[str, Any], kind: str = "playback", camera: str = "front") -> "CameraFile":
         name = _pick(raw, "name", "filename", "file", "path", "bvideoname", "videoname")
-        start_raw = _pick(raw, "starttime", "start", "begintime", "bstarttime", "time")
-        end_raw = _pick(raw, "endtime", "end", "bendtime", "endtime")
+        name = str(name or "").strip()
         return cls(
-            name=str(name or "").strip(),
+            name=name,
             size=_as_int(_pick(raw, "size", "filesize", "bvideosize", "len", "length")),
-            start=_as_ts(start_raw),
-            end=_as_ts(end_raw),
+            start=_as_ts(_pick(raw, "starttime", "start", "begintime", "bstarttime", "time"), name),
+            # end 不能傳 name，否則會跟 start 用同一個檔名時間戳 → 長度永遠 0
+            end=_as_ts(_pick(raw, "endtime", "end", "bendtime", "endtime")),
             index=_as_int(_pick(raw, "index", "idx", "id")),
             kind=kind,
             camera=camera,
             thumbnail=_pick(raw, "imgname", "thumb", "thumbnail", "img"),
             raw=raw if isinstance(raw, dict) else {},
         )
+
+    def rescaled(self, multiplier: int) -> "CameraFile":
+        """回傳換算後的副本（相機用 KB 回報 size 時用 1024 乘一次）。"""
+        if not multiplier or multiplier == 1 or self.size is None:
+            return self
+        clone = CameraFile(**{**self.__dict__})
+        clone.size = self.size * multiplier
+        return clone
 
     @property
     def duration(self) -> Optional[float]:

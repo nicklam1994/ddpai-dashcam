@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
@@ -289,8 +290,34 @@ class Transport:
     def file_url(self, name: str) -> str:
         return f"{self.base_url}/{name.lstrip('/')}"
 
+    def remote_size(self, name: str) -> Optional[int]:
+        """取得遠端檔案大小。
+
+        實測 Mini3 Pro 韌體不支援 `HEAD`（回空 body），但 `Range: bytes=0-0`
+        會回 `206 + Content-Range: bytes 0-0/<total>`，所以優先用 Range 探測。
+        """
+        headers = self.headers()
+        headers["Range"] = "bytes=0-0"
+        try:
+            resp = self.session.get(
+                self.file_url(name), headers=headers, stream=True, timeout=self.timeout
+            )
+            try:
+                content_range = resp.headers.get("Content-Range", "")
+                match = re.search(r"/(\d+)\s*$", content_range)
+                if match:
+                    return int(match.group(1))
+                length = resp.headers.get("Content-Length")
+                if resp.status_code == 200 and length:
+                    return int(length)
+            finally:
+                resp.close()
+        except (requests.RequestException, ValueError):
+            pass
+        return self.head(name)
+
     def head(self, name: str) -> Optional[int]:
-        """檢查遠端檔案大小；不支援 HEAD 的韌體回 None。"""
+        """後備：不支援 Range 的韌體才用 HEAD。"""
         try:
             resp = self.session.head(self.file_url(name), headers=self.headers(), timeout=self.timeout)
             if resp.status_code == 200 and resp.headers.get("Content-Length"):

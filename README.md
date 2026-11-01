@@ -68,17 +68,56 @@ ddpai reboot -y            # 重啟相機
 ### 4. 網頁儀表板
 
 ```bash
-ddpai serve                       # http://127.0.0.1:8766
-ddpai serve --bind 0.0.0.0        # 讓同網段其他裝置也能開
+./scripts/run.sh real             # 真機模式 → http://127.0.0.1:8766
+./scripts/run.sh demo             # 示範模式（模擬相機，不需實機）
+./scripts/run.sh stop             # 停止
+./scripts/run.sh status           # 看狀態
 ```
 
-不用 build、不用 node —— 單一 HTML 檔加原生 JS。功能：
+也可以直接 `ddpai serve`。不用 build、不用 node —— 單一 HTML 檔加原生 JS。功能：
 
 - 連線狀態、設備資訊、SD 卡用量條
+- **即時畫面**：MJPEG 直播（瀏覽器直接看，不用 VLC）、一鍵拍照、錄 10 秒短片
 - 錄影／事件清單，可直接在瀏覽器播放（後端做 Range 轉發，能拖時間軸）
 - 一鍵下載到電腦
 - 診斷頁（等同 `ddpai doctor`）
 - 可手動指定相機 IP 並重新連線
+
+相關 API：
+
+| 端點 | 用途 |
+| --- | --- |
+| `GET /api/live.mjpg` | MJPEG 直播串流（`<img src>` 即可） |
+| `GET /api/snapshot.jpg` | 抓一張即時照片（回 JPEG） |
+| `POST /api/record` `{"seconds":10}` | 錄短片並存到 `recordings/` |
+| `GET /api/media/<檔名>` | 播放錄影（支援 Range） |
+| `POST /api/download` `{"names":[...]}` | 下載到本機 `downloads/` |
+
+直播需要 `ffmpeg`（`sudo apt install ffmpeg`）；沒有 ffmpeg 時其他功能照常。
+
+---
+
+## 實機驗證結果（DDPAI Mini3 Pro / v7.1.0.48）
+
+以 `nicklam1994` 的實機（自稱 Mini3S，實際回報 **Mini3Pro_V4**）逐項實測：
+
+| 項目 | 結果 |
+| --- | --- |
+| 相機 IP | `193.168.0.1`（在 Windows Wi-Fi 側，WSL 要靠 powershell 才看得到） |
+| 握手策略 | `vcam-get-doilel` —— 需要 `doi-lel: 1`，與 visiondash 一致 |
+| 裝置資訊 | `DDPai Mini3Pro_V4` / `v7.1.0.48` / MAC `b8:4d:43:…`，序號欄位為空 |
+| 儲存空間 | 28.8 GB，已用 86–89%（來源 `API_GetBaseInfo`；`API_GetStorageInfo` 回不支援） |
+| 錄影清單 | 160+ 段 1080p 60 秒循環錄影，`APP_PlaybackListReq` 正常 |
+| 下載 | 140 MB / 段實測 45 秒（約 3.1 MB/s） |
+| 直播 | `rtsp://193.168.0.1:554/liveRTSP/av4` → 1280×720 H.264 + pcm_alaw |
+| 瀏覽器播放 | 正常，可拖時間軸，畫質 2560×1440 |
+
+實測踩到並已修正的四個韌體特性：
+
+1. **`size` 單位是 KB 不是 bytes**：清單回 `143360`，實際檔案 `146,800,640` bytes。程式用「Range 總長度 ÷ 清單值」自動判定（比值 ≈1024 → KB），判定一次後快取。
+2. **不支援 `HEAD`**：回空 body。改用 `Range: bytes=0-0` 讀 `Content-Range` 的總長度。
+3. **時間戳是「本地時間當 UTC」**：OSD 顯示 12:47 而 epoch 也是 12:47 UTC，若再套時區就會多出 8 小時。改為優先用檔名 `YYYYMMDDHHMMSS` 作時間（最權威），epoch 走 `utcfromtimestamp`。
+4. **同時只接受一個 RTSP session**：上一個 ffmpeg 沒收乾淨時，新連線會回 `DESCRIBE failed: 404 File Not Found`（看起來像路徑錯）。已加 ffmpeg 進程登記 + 失敗時清理重試。另外音頻是 `pcm_alaw`，mp4 容器不收，錄影要轉 aac（失敗則丟音頻）。
 
 ---
 
@@ -161,9 +200,10 @@ DDPAI_HOST=127.0.0.1:8088 ddpai serve --port 8766
 
 ## 已知限制
 
-- **Mini3S 無後鏡、無 GPS**：`--rear`、GPS 相關命令會回空清單，不是壞掉。
-- **下載速度受限於相機 AP**：實測值通常在 1–3 MB/s；`super download` 開關已實作（批次下載會自動開）。
-- **播放 API 各家不同**：網頁版只做「直連檔案 URL + Range 轉發」。若某韌體要求先開 `API_EnterPlaybackMode`，播放會 404，但下載不受影響。
+- **Mini3 系列無後鏡、無 GPS**：`--rear`、GPS 相關命令會回空清單，不是壞掉。
+- **下載速度受限於相機 AP**：實測約 3.1 MB/s（140 MB / 45 秒）；`super download` 開關已實作（批次下載會自動開）。
+- **相機只允許一個 RTSP session**：直播與錄影會互斥；官方 App 同時連著時，本機直播會失敗。程式已會清理殘留 ffmpeg 並重試一次。
+- **同時只能有一個客戶端連相機**：手機 App 連著時電腦可能連不上，先關掉 App。
 - **未實作雲端登入**：本專案只走本機 Wi-Fi，完全不碰 DDPAI 雲端帳號。
 
 ## 授權

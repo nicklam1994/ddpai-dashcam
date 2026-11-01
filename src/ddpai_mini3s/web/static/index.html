@@ -78,6 +78,18 @@
   .actions button { padding: 4px 10px; font-size: 13px; }
   .empty { color: var(--dim); padding: 26px 8px; text-align: center; }
 
+  .livebox {
+    position: relative; background: #05080b; border-radius: 10px;
+    overflow: hidden; aspect-ratio: 16 / 9; display: grid; place-items: center;
+    border: 1px solid #1a2532;
+  }
+  .livebox img { width: 100%; height: 100%; object-fit: cover; display: none; }
+  .livebox img[data-state="on"] { display: block; }
+  #live-hint { position: absolute; color: var(--dim); font-size: 13px; }
+  .livebox img[data-state="on"] + #live-hint { display: none; }
+  .livebtns { display: flex; gap: 8px; margin-top: 10px; }
+  .livebtns button { flex: 1; padding: 8px 6px; font-size: 13.5px; }
+
   #banner {
     display: none; margin: 0 0 14px; padding: 11px 14px; border-radius: 10px;
     background: #2a1214; border: 1px solid #4b1f22; color: #ffd7d7; font-size: 14px;
@@ -128,9 +140,17 @@
       <div class="row"><span>總容量</span><span id="sd-total">—</span></div>
     </section>
     <section class="card">
-      <h2>即時影像</h2>
-      <div class="row"><span>RTSP 網址</span><span id="rtsp" style="font-size:12.5px">—</span></div>
-      <div class="row"><span>提示</span><span style="font-size:12.5px;color:var(--dim)">用 VLC 開啟即可看直播</span></div>
+      <h2>即時畫面</h2>
+      <div class="livebox">
+        <img id="live" alt="即時畫面（按「開始直播」）" data-state="off" />
+        <div id="live-hint">按「開始直播」載入</div>
+      </div>
+      <div class="livebtns">
+        <button id="btn-live" class="primary">開始直播</button>
+        <button id="btn-snap">拍照</button>
+        <button id="btn-rec">錄 10 秒</button>
+      </div>
+      <div class="row" style="margin-top:8px"><span>RTSP 網址</span><span id="rtsp" style="font-size:12px">—</span></div>
     </section>
   </div>
 
@@ -235,8 +255,71 @@ async function loadInfo() {
   }
   try {
     const rtsp = await api("/api/rtsp");
-    $("rtsp").textContent = rtsp.url;
+    $("rtsp").textContent = rtsp.url + (rtsp.ffmpeg ? "" : "（缺 ffmpeg，直播不可用）");
   } catch (err) { $("rtsp").textContent = "—"; }
+}
+
+/* ── 即時畫面 ─────────────────────────────────────────── */
+const live = { on: false };
+
+function stopLive() {
+  const img = $("live");
+  img.removeAttribute("src");
+  img.dataset.state = "off";
+  live.on = false;
+  $("btn-live").textContent = "開始直播";
+  $("live-hint").textContent = "按「開始直播」載入";
+}
+
+function toggleLive() {
+  const img = $("live");
+  if (live.on) { stopLive(); return; }
+  live.on = true;
+  $("btn-live").textContent = "停止直播";
+  $("live-hint").textContent = "連線中…";
+  img.dataset.state = "on";
+  img.src = "/api/live.mjpg?width=960&t=" + Date.now();
+  img.onerror = () => {
+    $("live-hint").textContent = "直播中斷";
+    banner("直播中斷：相機可能被其他連線佔用（官方 App 同時連著也會這樣）。");
+    stopLive();
+  };
+}
+
+async function snap() {
+  banner("抓取即時照片…", "info");
+  try {
+    const res = await fetch("/api/snapshot.jpg?width=1280&t=" + Date.now());
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "HTTP " + res.status }));
+      throw new Error(err.error || "拍照失敗");
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "");
+    const a = document.createElement("a");
+    a.href = url; a.download = `ddpai_${stamp}.jpg`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    banner("已拍一張照片並存到本機下載", "info");
+  } catch (err) {
+    banner("拍照失敗：" + err.message);
+  }
+}
+
+async function recordClip() {
+  const btn = $("btn-rec");
+  btn.disabled = true; btn.textContent = "錄影中…";
+  banner("錄影 10 秒中，請稍候…", "info");
+  try {
+    const data = await api("/api/record", { method: "POST", body: JSON.stringify({ seconds: 10 }) });
+    banner(`已錄好 ${data.seconds} 秒（${fmtSize(data.bytes)}），開始下載`, "info");
+    window.open(data.url, "_blank");
+  } catch (err) {
+    banner("錄影失敗：" + err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = "錄 10 秒";
+  }
 }
 
 function fileTable(rows, kind) {
@@ -355,6 +438,9 @@ $("player-close").onclick = () => {
   video.pause(); video.removeAttribute("src"); video.load();
   $("player").close();
 };
+$("btn-live").onclick = toggleLive;
+$("btn-snap").onclick = snap;
+$("btn-rec").onclick = recordClip;
 $("player-dl").onclick = () => { if (state.current) download([state.current]); };
 $("player").addEventListener("close", () => {
   const video = $("video");

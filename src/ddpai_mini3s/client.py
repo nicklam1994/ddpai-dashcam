@@ -54,6 +54,7 @@ class Camera:
     ) -> None:
         self.timeout = timeout
         self.password = password or DEFAULT_PASSWORD
+        self._size_scale: Optional[int] = None
         if transport is not None:
             self.transport = transport
         else:
@@ -134,12 +135,40 @@ class Camera:
         return None
 
     # ── 檔案清單 ────────────────────────────────────────────────
+    def _size_multiplier(self, sample: Optional[CameraFile]) -> int:
+        """判斷清單裡的 `size` 是 bytes 還是 KB。
+
+        實測 Mini3 Pro 回 `size: 143360`，而檔案實際是 146,800,640 bytes
+        —— 也就是 KB。做法是拿一個檔案的 Range 總長度去比對，比值接近
+        1024 就是 KB。判斷一次後快取在實例上。
+        """
+        if self._size_scale is not None:
+            return self._size_scale
+        self._size_scale = 1
+        if sample is None or not sample.size:
+            return 1
+        real = self.transport.remote_size(sample.name)
+        if not real:
+            return 1
+        ratio = real / sample.size
+        if 900 <= ratio <= 1100:
+            self._size_scale = 1024
+        elif ratio >= 0.9:
+            self._size_scale = 1
+        log.debug("size 單位判定：乘以 %d（清單 %s vs 實際 %s）", self._size_scale, sample.size, real)
+        return self._size_scale
+
     def files(self, rear: bool = False) -> List[CameraFile]:
         payload = self.transport.request(CMD_FILES[bool(rear)])
         rows = find_list(payload, keys=("file", "files", "list", "data", "items"))
         camera = "rear" if rear else "front"
         files = [CameraFile.from_raw(row, camera=camera) for row in rows]
-        return [f for f in files if f.name]
+        files = [f for f in files if f.name]
+        if files:
+            scale = self._size_multiplier(files[0])
+            if scale != 1:
+                files = [f.rescaled(scale) for f in files]
+        return files
 
     def events(self, rear: bool = False) -> List[CameraFile]:
         payload = self.transport.request(CMD_EVENTS[bool(rear)])
@@ -267,7 +296,19 @@ class Camera:
 
     # ── 其他 ────────────────────────────────────────────────────
     def snapshot(self, dest: Optional[str | Path] = None) -> Optional[Path]:
-        """請相機拍一張，回傳本機路徑（有些韌體只存在 SD 卡上）。"""
+        """抓一張即時照片。
+
+        優先走 RTSP + ffmpeg（實測 Mini3 Pro 有效、解析度 1280×720）；
+        沒有 ffmpeg 時才退回 `API_CameraCapture`（多數韌體沒這支）。
+        """
+        from . import live
+
+        target = Path(dest or f"snapshot_{time.strftime('%Y%m%d_%H%M%S')}.jpg")
+        if live.available():
+            frame = live.grab_frame(self.rtsp_url())
+            target.write_bytes(frame)
+            return target
+
         payload = self.transport.request("API_CameraCapture")
         data = find_dict(payload)
         remote = None
@@ -278,7 +319,6 @@ class Camera:
                 break
         if not remote:
             return None
-        target = Path(dest or f"snapshot_{int(time.time())}.jpg")
         resp = self.transport.open_stream(remote)
         try:
             if resp.status_code != 200:

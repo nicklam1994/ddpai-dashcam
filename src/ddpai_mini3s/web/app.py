@@ -22,13 +22,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from ..client import Camera, CameraError, CameraUnreachable
 from ..models import human_size
-from .. import discovery
+from .. import discovery, live
 from ..transport import STRATEGIES
 
 log = logging.getLogger("ddpai.web")
 
 STATIC_DIR = Path(__file__).parent / "static"
 DOWNLOAD_DIR = Path(os.environ.get("DDPAI_DOWNLOAD_DIR", "downloads")).expanduser()
+RECORD_DIR = Path(os.environ.get("DDPAI_RECORD_DIR", "recordings")).expanduser()
 
 
 @asynccontextmanager
@@ -270,6 +271,92 @@ def api_local(name: str) -> Response:
 @app.get("/api/rtsp")
 def api_rtsp(rear: bool = False) -> Any:
     try:
-        return ok({"url": get_camera().rtsp_url(rear=rear)})
+        return ok({"url": get_camera().rtsp_url(rear=rear), "ffmpeg": live.available()})
     except Exception as exc:  # noqa: BLE001
         return fail(exc)
+
+
+# ── 即時影像：照片 / MJPEG 直播 / 錄短片 ───────────────────────
+_live_slots = threading.Semaphore(2)
+
+
+@app.get("/api/snapshot.jpg")
+def api_snapshot(width: int = Query(1280, ge=320, le=2560)) -> Response:
+    """抓一張即時照片（直接回 JPEG，前端可當 <img src> 用）。"""
+    try:
+        camera = get_camera()
+        frame = live.grab_frame(camera.rtsp_url(), width=width)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(exc)})
+    return Response(content=frame, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/live.mjpg")
+def api_live(width: int = Query(960, ge=320, le=1920)) -> Response:
+    """MJPEG 直播串流，瀏覽器用 <img> 就能看。"""
+    if not _live_slots.acquire(blocking=False):
+        return JSONResponse(status_code=429,
+                            content={"ok": False, "error": "已有 2 個直播連線在跑，稍後再試"})
+    try:
+        camera = get_camera()
+        url = camera.rtsp_url()
+    except Exception as exc:  # noqa: BLE001
+        _live_slots.release()
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(exc)})
+
+    def stream():
+        try:
+            for frame in live.mjpeg_frames(url, width=width):
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                       + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("直播中斷：%s", exc)
+        finally:
+            _live_slots.release()
+
+    return StreamingResponse(
+        stream(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store", "Connection": "close"},
+    )
+
+
+@app.post("/api/record")
+def api_record(payload: Dict[str, Any] = Body(default={})) -> Any:
+    """錄一段直播存成 mp4（預設 10 秒），回傳可下載的路徑。"""
+    seconds = int((payload or {}).get("seconds", 10))
+    try:
+        camera = get_camera()
+        RECORD_DIR.mkdir(parents=True, exist_ok=True)
+        path = live.record(camera.rtsp_url(), seconds=seconds, dest_dir=str(RECORD_DIR))
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+    return ok({
+        "name": path.name,
+        "seconds": seconds,
+        "bytes": path.stat().st_size,
+        "url": f"/api/records/{path.name}",
+    })
+
+
+@app.get("/api/records")
+def api_records() -> Any:
+    RECORD_DIR.mkdir(parents=True, exist_ok=True)
+    items = []
+    for path in sorted(RECORD_DIR.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True):
+        items.append({"name": path.name, "bytes": path.stat().st_size,
+                      "url": f"/api/records/{path.name}"})
+    return ok(items)
+
+
+@app.get("/api/records/{name}")
+def api_record_file(name: str) -> Response:
+    path = (RECORD_DIR / name).resolve()
+    try:
+        path.relative_to(RECORD_DIR.resolve())
+    except ValueError:
+        return fail(ValueError("非法路徑"), status=400)
+    if not path.exists():
+        return fail(FileNotFoundError(name), status=404)
+    return FileResponse(path, media_type="video/mp4", filename=name)
