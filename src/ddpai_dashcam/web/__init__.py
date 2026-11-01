@@ -1,4 +1,4 @@
-"""Web 子套件。`from ddpai_mini3s.web.app import app` 取得 FastAPI 實例。"""
+"""Web 子套件。`from ddpai_dashcam.web.app import app` 取得 FastAPI 實例。"""
 
 __all__ = ["app"]
 

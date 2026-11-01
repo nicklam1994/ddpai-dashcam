@@ -41,7 +41,7 @@ stop_all() {
     fi
   done
   # 保險：清掉殘留的同類進程（用方括號避免 pkill 比對到自己）
-  pkill -f "[u]vicorn ddpai_mini3s.web.app" 2>/dev/null || true
+  pkill -f "[u]vicorn ddpai_dashcam.web.app" 2>/dev/null || true
   pkill -f "[f]ake_camera_server.py" 2>/dev/null || true
 }
 
@@ -61,7 +61,7 @@ case "${1:-real}" in
   real)
     stop_all
     echo "啟動儀表板（真機模式，自動探測相機）…"
-    setsid nohup "$PY" -m uvicorn ddpai_mini3s.web.app:app \
+    setsid nohup "$PY" -m uvicorn ddpai_dashcam.web.app:app \
       --host 0.0.0.0 --port "$PORT" \
       > "$RUN_DIR/web.log" 2>&1 < /dev/null &
     echo $! > "$RUN_DIR/web.pid"
@@ -86,7 +86,7 @@ case "${1:-real}" in
     done
 
     echo "啟動儀表板（示範模式，指向模擬相機）…"
-    DDPAI_HOST="127.0.0.1:$FAKE_PORT" setsid nohup "$PY" -m uvicorn ddpai_mini3s.web.app:app \
+    DDPAI_HOST="127.0.0.1:$FAKE_PORT" setsid nohup "$PY" -m uvicorn ddpai_dashcam.web.app:app \
       --host 0.0.0.0 --port "$PORT" \
       > "$RUN_DIR/web.log" 2>&1 < /dev/null &
     echo $! > "$RUN_DIR/web.pid"

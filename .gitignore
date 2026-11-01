@@ -14,3 +14,6 @@ snapshot_*.jpg
 *.log
 recordings/
 photos/
+
+# 官方 APK（分析用，不入庫）
+*.apk

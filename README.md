@@ -17,8 +17,8 @@
 ## 快速開始
 
 ```bash
-git clone https://github.com/nicklam1994/ddpai-mini3s.git
-cd ddpai-mini3s
+git clone https://github.com/nicklam1994/ddpai-dashcam.git
+cd ddpai-dashcam
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -e ".[dev,web]"
 source .venv/bin/activate
@@ -170,7 +170,7 @@ DDPAI 各世代韌體對同一支 API 的要求不同：
 ## 架構
 
 ```
-src/ddpai_mini3s/
+src/ddpai_dashcam/
 ├── transport.py    策略矩陣、session 握手、單次請求、串流連線
 ├── discovery.py    候選 IP、WSL→Windows Wi-Fi 閘道、並行探測
 ├── parser.py       剝殼：data/file/list 嵌套、JSON-in-string、HTML 攔截頁

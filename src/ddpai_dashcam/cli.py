@@ -316,14 +316,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
     except ImportError:
-        print(paint("✗ 需要 Web 依賴：pip install 'ddpai-mini3s[web]'", Palette.RED))
+        print(paint("✗ 需要 Web 依賴：pip install 'ddpai-dashcam[web]'", Palette.RED))
         return 2
     if args.host_ip:
         os.environ["DDPAI_HOST"] = args.host_ip
     if args.password:
         os.environ["DDPAI_PASSWORD"] = args.password
     print(paint(f"  Web 儀表板： http://{args.bind}:{args.port}", Palette.CYAN))
-    uvicorn.run("ddpai_mini3s.web.app:app", host=args.bind, port=args.port,
+    uvicorn.run("ddpai_dashcam.web.app:app", host=args.bind, port=args.port,
                 reload=args.reload, log_level="info")
     return 0
 
@@ -343,7 +343,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  ddpai serve               # 開網頁儀表板 http://127.0.0.1:8766\n"
         ),
     )
-    parser.add_argument("--version", action="version", version=f"ddpai-mini3s {__version__}")
+    parser.add_argument("--version", action="version", version=f"ddpai-dashcam {__version__}")
     parser.add_argument("--debug", action="store_true", help="顯示 debug log")
 
     common = argparse.ArgumentParser(add_help=False)

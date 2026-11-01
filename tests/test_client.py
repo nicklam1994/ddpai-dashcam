@@ -11,9 +11,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from fake_camera import FILES, MEDIA, FakeCamera  # noqa: E402
 
-from ddpai_mini3s import Camera, discovery  # noqa: E402
-from ddpai_mini3s.parser import find_list, maybe_json, unwrap  # noqa: E402
-from ddpai_mini3s.transport import STRATEGY_BY_ID, Transport  # noqa: E402
+from ddpai_dashcam import Camera, discovery  # noqa: E402
+from ddpai_dashcam.parser import find_list, maybe_json, unwrap  # noqa: E402
+from ddpai_dashcam.transport import STRATEGY_BY_ID, Transport  # noqa: E402
 
 
 @pytest.fixture(params=["plain", "doilel", "session"])
@@ -180,7 +180,7 @@ def web_client(monkeypatch):
         monkeypatch.setenv("DDPAI_HOST", fake.host)
         import importlib
 
-        from ddpai_mini3s.web import app as web_app
+        from ddpai_dashcam.web import app as web_app
 
         importlib.reload(web_app)
         with fastapi_testclient.TestClient(web_app.app) as client:
@@ -215,7 +215,7 @@ def test_web_media_range(web_client):
 
 def test_web_download(web_client, tmp_path, monkeypatch):
     client, _ = web_client
-    from ddpai_mini3s.web import app as web_app
+    from ddpai_dashcam.web import app as web_app
 
     monkeypatch.setattr(web_app, "DOWNLOAD_DIR", tmp_path)
     result = client.post("/api/download", json={"names": [FILES[2]["name"]]}).json()
