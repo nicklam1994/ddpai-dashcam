@@ -109,6 +109,10 @@ class Transport:
     strategy: Optional[Strategy] = None
     session_token: str = ""
     password: str = ""
+    user: str = "admin"
+    level: int = 0
+    uid: str = ""
+    logged_in: bool = False
     probes: List[ProbeResult] = field(default_factory=list, repr=False)
     _session: Optional[requests.Session] = field(default=None, repr=False)
 
@@ -254,19 +258,38 @@ class Transport:
                 self.session_token = token
                 log.debug("取得 session token：%s…", token[:8])
                 return token
-        # 有些韌體要先用預設密碼登入才肯發 token
-        if self.password:
-            self._try_logon()
         return ""
 
     def _try_logon(self) -> None:
-        for cmd in ("API_SetLogonInfo", "API_RequestCertificate"):
-            probe = self._send(
-                self.strategy,
-                cmd,
-                {"password": self.password, "pwd": self.password},
-                timeout=min(self.timeout, 4.0),
-            )
+        """走官方 App 的登入流程（抓拍等控制命令必須先登入）。
+
+        App 的序列：`API_RequestSessionID` → `API_RequestCertificate`。
+        關鍵在於 certificate 要 **POST + JSON body**，用 GET 加 query 參數
+        只會回 `WEB_E_ERR_WRONG_CGI_REQUEST`：
+
+            {"user":"admin","password":"admin","level":0,"uid":"<imei><package>"}
+
+        預設帳密是 admin/admin（`Device.java` 的 field initializer）。
+        """
+        payload = {
+            "user": self.user,
+            "password": self.password or self.user,
+            "level": self.level,
+            "uid": self.uid,
+        }
+        body = json.dumps(payload, separators=(",", ":"))
+        token = self._post_json("API_RequestCertificate", body)
+        if token:
+            self.session_token = token
+            self.logged_in = True
+            return
+
+        # 舊韌體用 API_SetLogonInfo
+        if self.strategy is None:
+            return
+        for cmd in ("API_SetLogonInfo",):
+            probe = self._send(self.strategy, cmd, {"password": self.password},
+                              timeout=min(self.timeout, 4.0))
             self.probes.append(probe)
             if probe.ok:
                 from .parser import extract_string
@@ -274,10 +297,58 @@ class Transport:
                 token = extract_string(_decode(probe.body), "acSessionId", "sessionid", "certificate")
                 if token:
                     self.session_token = token
+                    self.logged_in = True
                     return
 
+    def _post_json(self, cmd: str, body: str) -> Optional[str]:
+        """POST JSON body 到 cmd.cgi，成功（errcode 0）就回傳新 session token。"""
+        if self.strategy is None:
+            return None
+        url = self.base_url + self.strategy.path
+        headers = self.strategy.headers(self.session_token)
+        headers["Content-Type"] = "application/json"
+        if self.session_token:
+            # 實測：certificate 除了 JSON body，還需要 sessionid header 才不會回
+            # WEB_E_ERR_WRONG_CGI_REQUEST
+            headers["sessionid"] = self.session_token
+        try:
+            resp = self.session.post(url, params={"cmd": cmd}, data=body,
+                                     headers=headers, timeout=self.timeout)
+        except requests.RequestException as exc:
+            log.debug("%s POST 失敗：%s", cmd, exc)
+            return None
+
+        try:
+            parsed = json.loads(resp.text or "{}")
+        except (json.JSONDecodeError, ValueError):
+            return None
+        from .parser import errcode, extract_string
+
+        code = errcode(parsed)
+        log.debug("%s → errcode=%s", cmd, code)
+        if code not in (0, None):
+            return None
+        # 有些韌體順便回一個新的 session id
+        token = extract_string(parsed, "acSessionId")
+        return token or self.session_token
+
+    def login(self, user: str = "admin", password: str = "admin", level: int = 0) -> bool:
+        """登入相機。抓拍（API_CameraCapture）等控制命令必須先登入。
+
+        讀取類 API（清單、容量）不需要登入，所以這個失敗也不影響既有功能。
+        """
+        self.user = user or "admin"
+        self.password = password
+        self.level = level
+        self.uid = self.uid or f"{int(time.time() * 1000)}com.vyou.ddpai"
+        if self.strategy is None:
+            self.detect()
+        if not self.session_token:
+            self._try_session()
+        self._try_logon()
+        return self.logged_in
+
     def probe_matrix(self, commands: Tuple[str, ...] = PROBE_COMMANDS) -> List[Dict[str, Any]]:
-        """給 doctor 用的完整探測表。"""
         rows: List[Dict[str, Any]] = []
         for strategy in STRATEGIES:
             for cmd in commands:

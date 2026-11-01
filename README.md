@@ -121,24 +121,53 @@ ddpai reboot -y            # 重啟相機
 | 下載 | 140 MB / 段實測 45 秒（約 3.1 MB/s） |
 | 直播 | `rtsp://193.168.0.1:554/liveRTSP/av4` → 1280×720 H.264 + pcm_alaw |
 | 瀏覽器播放 | 正常，可拖時間軸，畫質 2560×1440 |
-| 抓拍照片（SD 卡） | **不存在** —— 詳見下方「為什麼相機裡沒有抓拍照片」 |
+| 抓拍照片（SD 卡） | **存在**，需先登入才能觸發 —— 詳見下節 |
 
-### 為什麼相機裡沒有抓拍照片（實測）
+### 抓拍照片到底在哪（APK 反編譯 + 實機結論）
 
-使用者的直覺是「行車紀錄儀應該有抓拍的照片」，於是把所有可能路徑都試了一輪：
+原以為相機不存抓拍照片。反編譯官方 APK `vv8.2.7.1021` 後發現是**我們用錯 API**：
 
-| 探測 | 結果 |
-| --- | --- |
-| 24 支照片清單 cmd（`APP_PhotoListReq`、`API_GetPhotoList`、`APP_AlbumListReq`、`API_GetThumbList`…） | 全部回 `0x7700003C`（不支援） |
-| 10 支拍照 cmd（`API_CameraCapture`、`APP_Snapshot`、`APP_TakePhoto`…） | 全部不支援（`0x7700003C` / `0x77000045`） |
-| `APP_PlaybackListReq` 全部 166 個檔案副檔名 | **100% `.mp4`**，零張 JPG |
-| 猜 6 種 JPG 路徑（含 `/DCIM/PHOTO/`） | 全部 404 |
-| 事件錄影的 JPG 兄弟檔 | 404（事件本身是 72 MB 的 mp4，可正常下載） |
-| HTTP 目錄列表（`/`、`/DCIM/`、`/photo/`…） | 一律回 API 錯誤 JSON，無目錄瀏覽 |
+1. **錯誤碼我之前判錯了**。APK 的 `ErrCode.java` 給出正確含義：
+   - `1996488773` = `LOGIN_SESSION_ERROR`（**不是**「不支援」）
+   - `1996488764` = `WEB_E_ERR_WRONG_CGI_REQUEST`（參數／格式錯）
+   - `1996488762` = `WEB_E_ERR_DECODE_JSON`
 
-結論：**這個韌體（Mini3 Pro v7.1.0.48）不把抓拍照片寫進 SD 卡**。DDPAI App 裡的「抓拍」是從即時影像串流取 frame 存到手機，跟本專案「拍照」按鈕的做法完全一樣 —— 所以照片存在電腦端相冊（`photos/`），不在相機上。
+2. **抓拍必須先登入**。`API_CameraCapture` 一直回 `LOGIN_SESSION_ERROR` 就是這個原因。
+   APK 的登入序列是 `API_RequestSessionID` → `API_RequestCertificate`，而且 certificate
+   要 **POST + JSON body**（用 GET 加 query 一定失敗）：
 
-程式仍保留自動偵測（`Camera.photo_support()`），若哪天換成支援照片 API 的機型／韌體，「相機照片」分頁會自動出現縮圖牆。
+   ```json
+   {"user":"admin","password":"admin","level":0,"uid":"<any>"}
+   ```
+
+   預設帳密 `admin`/`admin` 寫死在 `Device.java` 的 field initializer。
+
+3. **照片真的存在，而且真的會被刪**。登入後 `API_CameraCapture` 回 `errcode: 0`，
+   接著 mailbox 會吐出：
+
+   ```
+   MSG_EventOccured  {"imgname":"G_20261101131646_050_0000_X.jpg","size":"3072"}
+   MSG_DeleteEvent   {"file":["G_20261031035114_009_0015_L.jpg"]}
+   ```
+
+   照片以 `G_<YYYYMMDDHHMMSS>_<序號>_<時長>_X.jpg` 掛在相機**根目錄**，
+   `http://<ip>/G_....jpg` 直接下載得到（實測 2560×1440、510 KB、帶 EXIF）。
+   相機用 ring buffer 管理，滿了就發 `MSG_DeleteEvent` 刪最舊的 ——
+   所以「抓拍照片會消失」是真的，但不一定是手機 App 刪的，相機自己也會刪。
+
+4. **沒有任何「列出所有抓拍照片」的 API**。這點也確認了：
+   - 24 支照片清單 cmd 全部 `WRONG_CGI_REQUEST`
+   - 列表類 cmd 加 `property=photo` / `type=photo` 等參數一樣不行（POST JSON body 也試過）
+   - `DEV_PHOTO_LIST_REQ`（`Config.cgi?action=dir&property=photo`）只用在 NPD 機型，
+     本機是自家 `bz` 協議，不走它
+   - 播放清單 166 筆全是 `.mp4`；`API_GpsFileListReq` 只有 `.git` / `.gpx`
+
+   官方 App 也是靠 mailbox 的 `MSG_EventOccured` 才知道有新照片（拿到檔名才下載），
+   所以**離線時按遙控抓拍的照片，只能靠時間窗 + 序號暴力枚舉找回**（12 req/s，
+   一小時約 4 萬個候選，實務上不划算）。
+
+因此本工具的定位是：**由工具發起抓拍**（`POST /api/camera-capture` 或 `ddpai capture`），
+拿到檔名後同時存在相機與本機相冊；相冊的「相機照片」分頁另外顯示可列舉的事件縮圖。
 
 實測踩到並已修正的四個韌體特性：
 

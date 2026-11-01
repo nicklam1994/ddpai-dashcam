@@ -155,7 +155,10 @@ def test_photo_capability_reports_unsupported(camera):
 def test_camera_album_bundles_events_and_videos(camera):
     cam, _ = camera
     album = cam.camera_album()
-    assert album["photos"]["supported"] is False
+    # 沒有照片清單 API 時，退回事件縮圖（假相機的事件帶 imgname）
+    assert album["photos"]["source"] == "event-thumbs"
+    assert album["photos"]["count"] == 1
+    assert album["photos"]["items"][0]["name"].endswith(".JPG")
     assert album["events"]["count"] == 1
     assert album["videos"]["count"] == 3
     assert album["videos"]["items"][0]["basename"].endswith(".MP4")

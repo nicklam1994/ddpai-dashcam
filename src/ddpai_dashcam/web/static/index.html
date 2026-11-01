@@ -382,6 +382,19 @@ async function snap() {
   }
 }
 
+async function cameraCapture(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "抓拍中…"; }
+  banner("叫相機抓拍（需先登入相機）…", "info");
+  try {
+    const data = await api("/api/camera-capture", { method: "POST", body: "{}" });
+    banner(`已抓拍 ${data.name}（${fmtSize(data.bytes)}），存在相機 SD 卡並已存到本機`, "info");
+    loadCameraAlbum("camera-photos");
+  } catch (err) {
+    banner("相機抓拍失敗：" + err.message);
+    if (btn) { btn.disabled = false; btn.textContent = "相機抓拍一張"; }
+  }
+}
+
 async function recordClip() {
   const btn = $("btn-rec");
   btn.disabled = true; btn.textContent = "錄影中…";
@@ -537,16 +550,18 @@ async function loadCameraAlbum(src) {
   try {
     const album = await api("/api/camera-album");
     if (src === "camera-photos") {
+      const btn = `<div class="galhead" style="margin-bottom:10px">
+          <button id="btn-cam-snap" class="primary">相機抓拍一張</button>
+          <span class="meta">存在相機 SD 卡，同時下載到本機相冊</span>
+        </div>`;
       if (!album.photos.supported) {
         $("gal-meta").textContent = "0 張";
-        $("pane-gallery").innerHTML =
-          `<div class="notice">這台相機的韌體不儲存抓拍照片。</div>
-           <div class="empty">${album.photos.reason}<br><br>
-           要照片請用上面「拍照」—— 會直接從即時畫面擷取並存到「我的抓拍」（與 DDPAI App 相同做法）。</div>`;
+        $("pane-gallery").innerHTML = btn +
+          `<div class="notice">${album.photos.reason}</div>`;
         return;
       }
       $("gal-meta").textContent = `${album.photos.count} 張`;
-      $("pane-gallery").innerHTML = cameraCards(album.photos.items, "photo");
+      $("pane-gallery").innerHTML = btn + cameraCards(album.photos.items, "photo");
       return;
     }
 
@@ -620,6 +635,11 @@ function renderTabs() {
 }
 
 document.addEventListener("click", (event) => {
+  const camSnap = event.target.closest("#btn-cam-snap");
+  if (camSnap) {
+    cameraCapture(camSnap);
+    return;
+  }
   const srcBtn = event.target.closest(".src");
   if (srcBtn) {
     state.src = srcBtn.dataset.src;

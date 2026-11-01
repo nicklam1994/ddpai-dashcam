@@ -312,6 +312,25 @@ def cmd_raw(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_capture(args: argparse.Namespace) -> int:
+    with make_camera(args) as cam:
+        if not cam.login(args.user, args.password or "admin"):
+            print(paint("✗ 登入相機失敗（API_RequestCertificate 未通過）", Palette.RED))
+            return 1
+        photo = cam.capture()
+        if photo is None:
+            print(paint("✗ 相機沒有回報新照片（mailbox 沒有 MSG_EventOccured）", Palette.RED))
+            return 1
+        header("抓拍")
+        kv("相機檔名", photo.name)
+        kv("相機路徑", cam.photo_url(photo.name))
+        if args.no_download:
+            return 0
+        path = cam.download_photo(photo.name, args.output, progress=progress_printer())
+    print(paint(f"✓ 已存到 {path}", Palette.GREEN))
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
@@ -403,6 +422,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("cmd", help="例如 API_GetBaseInfo")
     p.add_argument("--param", action="append", help="KEY=VALUE")
     p.set_defaults(func=cmd_raw)
+
+    p = sub.add_parser("capture", parents=[common], help="叫相機抓拍一張（存 SD 卡）")
+    p.add_argument("-o", "--output", default="photos", help="本機目錄")
+    p.add_argument("--user", default="admin", help="相機帳號（預設 admin）")
+    p.add_argument("--no-download", action="store_true", help="只抓拍不下載")
+    p.set_defaults(func=cmd_capture)
 
     p = sub.add_parser("serve", help="啟動網頁儀表板")
     p.add_argument("--bind", default="127.0.0.1")

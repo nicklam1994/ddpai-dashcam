@@ -390,6 +390,48 @@ def api_camera_photo(name: str) -> Response:
     return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "max-age=600"})
 
 
+@app.post("/api/camera-capture")
+def api_camera_capture(payload: Dict[str, Any] = Body(default={})) -> Any:
+    """叫相機自己抓拍一張（存在 SD 卡），並下載到本機相冊。
+
+    與 `/api/snapshot.jpg` 的分別：
+      * snapshot = 從即時串流截圖（相機不留下檔案）
+      * camera-capture = 相機真的寫一張 JPG 到 SD 卡（需要登入）
+    """
+    keep_on_camera = bool((payload or {}).get("keep_on_camera", True))
+    try:
+        camera = get_camera()
+        if not camera.login():
+            return fail(CameraError("登入相機失敗（API_RequestCertificate 未通過）"))
+        photo = camera.capture()
+        if photo is None:
+            return fail(CameraError("相機沒有回報新照片（mailbox 沒有 MSG_EventOccured）"))
+        target = camera.download_photo(photo.name, dest_dir=PHOTO_DIR / "camera")
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+    return ok({
+        "name": photo.name,
+        "saved": str(target),
+        "bytes": target.stat().st_size,
+        "on_camera": keep_on_camera,
+        "url": f"/api/camera-photo/{photo.name}",
+        "local_url": f"/api/photos/camera/{photo.name}",
+    })
+
+
+@app.get("/api/photos/{folder}/{name}")
+def api_photo_in_folder(folder: str, name: str) -> Response:
+    """相冊子目錄（例如 photos/camera/ 存放從相機抓拍回來的照片）。"""
+    try:
+        path = _safe_child(PHOTO_DIR, f"{folder}/{name}")
+    except ValueError:
+        return fail(ValueError("非法路徑"), status=400)
+    if not path.exists():
+        return fail(FileNotFoundError(name), status=404)
+    return FileResponse(path, media_type="image/jpeg")
+
+
 @app.get("/api/captures")
 def api_captures() -> Any:
     """相冊總覽：照片 + 錄影片段（同一個畫面用）。"""

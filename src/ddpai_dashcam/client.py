@@ -244,8 +244,21 @@ class Camera:
         return self._photo_cap
 
     def camera_album(self, limit: int = 0) -> Dict[str, Any]:
-        """相機端可看的媒體：照片（若支援）、事件、錄影。"""
-        photos = self.photo_support()
+        """相機端可看的媒體：照片、事件、錄影。
+
+        照片部分：若韌體有照片清單 API 就用它；否則退回「事件縮圖」
+        （EventListReq 的 imgname，可在根目錄直接下載 —— 這是本機韌體
+        唯一能列舉的圖片來源）。抓拍照片只能靠 `capture()` 產生當下取得，
+        因為韌體沒有提供「列出所有抓拍」的 API。
+        """
+        support = self.photo_support()
+        if support["supported"]:
+            photos = support["items"]
+            photo_source = "api"
+        else:
+            photos = self.event_photos()
+            photo_source = "event-thumbs"
+
         events = self.events()
         videos = self.files()
 
@@ -254,10 +267,12 @@ class Camera:
 
         return {
             "photos": {
-                "supported": photos["supported"],
-                "reason": photos["reason"],
-                "count": len(photos["items"]),
-                "items": [item.to_dict() for item in trim(photos["items"])],
+                "supported": bool(photos),
+                "source": photo_source,
+                "reason": "" if photos else support["reason"],
+                "capture_supported": True,
+                "count": len(photos),
+                "items": [item.to_dict() for item in trim(photos)],
             },
             "events": {
                 "count": len(events),
@@ -268,6 +283,109 @@ class Camera:
                 "items": [item.to_dict() for item in trim(videos)],
             },
         }
+
+    # ── 抓拍（需要登入）──────────────────────────────────────────
+    def login(self, user: str = "admin", password: str = "admin") -> bool:
+        return self.transport.login(user=user, password=password)
+
+    def mailbox(self, clear: bool = False) -> List[Dict[str, Any]]:
+        """讀 mailbox 訊息。相機用這個通知「有新檔案／刪了哪個檔案」。
+
+        實測（Mini3 Pro v7.1.0.48）抓拍後會出現：
+
+            {"msgid":"MSG_EventOccured",
+             "data":"{\\"imgname\\":\\"G_20261101131646_050_0000_X.jpg\\",\\"size\\":\\"3072\\"}"}
+            {"msgid":"MSG_DeleteEvent","data":"{\\"file\\":[\\"G_20261031035114_009_0015_L.jpg\\"]}"}
+        """
+        payload = self.transport.request("API_GetMailboxData")
+        from .parser import maybe_json
+
+        body = payload.get("data") if isinstance(payload, dict) else payload
+        body = maybe_json(body)
+        messages = find_list(body, keys=("msg", "message", "messages", "data"))
+        parsed = []
+        for item in messages:
+            entry = dict(item)
+            entry["data"] = maybe_json(entry.get("data"))
+            parsed.append(entry)
+        return parsed
+
+    def capture(self, timeout: float = 12.0) -> Optional[CameraFile]:
+        """叫相機自己抓拍一張（存在相機 SD 卡上，不是從串流截圖）。
+
+        流程：登入 → API_CameraCapture → 從 mailbox 取新檔名。
+        照片以 `G_<YYYYMMDDHHMMSS>_<序號>_<時長>_X.jpg` 掛在相機根目錄，
+        可透過 `photo_url()` 直接下載。
+
+        回傳 CameraFile，失敗回 None（例如未登入、相機不支援）。
+        """
+        if not self.transport.logged_in:
+            self.login()
+
+        before = {item.get("name") for item in self.mailbox()}
+        try:
+            self.transport.request("API_CameraCapture", timeout=timeout)
+        except TransportError as exc:
+            log.debug("抓拍失敗：%s", exc)
+            return None
+
+        # 相機非同步寫檔，mailbox 可能要幾百毫秒才出現
+        for _ in range(6):
+            for message in self.mailbox():
+                if message.get("msgid") != "MSG_EventOccured":
+                    continue
+                data = message.get("data") or {}
+                name = str(data.get("imgname") or "").strip()
+                if name.lower().endswith((".jpg", ".jpeg")):
+                    return CameraFile.from_raw(
+                        {"name": name, "size": data.get("size")}, kind="photo"
+                    )
+            time.sleep(0.4)
+        return None
+
+    def photo_url(self, name: str) -> str:
+        """照片／事件縮圖都是根目錄下的檔名，例如 G_....jpg / N_....jpg。"""
+        return f"{self.transport.base_url}/{name.lstrip('/')}"
+
+    def download_photo(self, name: str, dest_dir: str | Path = "photos",
+                       progress: Optional[ProgressFn] = None) -> Path:
+        dest = Path(dest_dir).expanduser()
+        dest.mkdir(parents=True, exist_ok=True)
+        target = dest / os.path.basename(name)
+
+        resp = self.transport.session.get(
+            self.photo_url(name), headers=self.transport.headers(), stream=True,
+            timeout=self.transport.timeout,
+        )
+        try:
+            if resp.status_code != 200:
+                raise CameraError(f"{name} 下載失敗：HTTP {resp.status_code}")
+            total = int(resp.headers.get("Content-Length") or 0) or None
+            done = 0
+            with target.open("wb") as fh:
+                for chunk in resp.iter_content(chunk_size=CHUNK):
+                    if not chunk:
+                        continue
+                    fh.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total)
+        finally:
+            resp.close()
+        return target
+
+    def event_photos(self) -> List[CameraFile]:
+        """事件縮圖（EventListReq 的 imgname），可在根目錄直接下載。"""
+        payload = self.transport.request(CMD_EVENTS[False])
+        rows = find_list(payload, keys=("event", "events", "file", "list", "data"))
+        photos: List[CameraFile] = []
+        for row in rows:
+            img = row.get("imgname") or row.get("img")
+            if isinstance(img, str) and img.lower().endswith((".jpg", ".jpeg")):
+                item = CameraFile.from_raw(row, kind="photo")
+                item.name = img
+                photos.append(item)
+        return photos
 
     # ── 下載 ────────────────────────────────────────────────────
     def download(
