@@ -78,8 +78,11 @@ ddpai reboot -y            # 重啟相機
 
 - 連線狀態、設備資訊、SD 卡用量條
 - **即時畫面**：MJPEG 直播（瀏覽器直接看，不用 VLC）、一鍵拍照、錄 10 秒短片
-- **本地相冊**：拍照與錄影自動存到本機（`photos/`、`recordings/`），縮圖牆可直接放大檢視、下載、刪除
-- 錄影／事件清單，可直接在瀏覽器播放（後端做 Range 轉發，能拖時間軸）
+- **相冊**（四個來源可切換）：
+  - `我的抓拍` — 本機拍照／錄影，自動存到 `photos/`、`recordings/`，可放大檢視、下載、刪除
+  - `相機照片` — 相機內建照片（**會自動偵測韌體支不支援**；本機實測不支援，見下節）
+  - `相機事件` — 事件／碰撞錄影，可直接播放與下載
+  - `相機錄影` — 循環錄影清單，可直接播放與下載
 - 一鍵下載到電腦
 - 診斷頁（等同 `ddpai doctor`）
 - 可手動指定相機 IP 並重新連線
@@ -91,9 +94,11 @@ ddpai reboot -y            # 重啟相機
 | `GET /api/live.mjpg` | MJPEG 直播串流（`<img src>` 即可） |
 | `GET /api/snapshot.jpg` | 抓一張即時照片（回 JPEG，並存進相冊；`?save=false` 只回不存） |
 | `POST /api/record` `{"seconds":10}` | 錄短片並存到 `recordings/` |
-| `GET /api/captures` | 相冊總覽：照片 + 錄影，按時間倒序 |
-| `GET /api/photos` · `GET/DELETE /api/photos/<檔名>` | 相冊照片列表／檢視／刪除 |
-| `GET/DELETE /api/records/<檔名>` | 錄影片段檢視／刪除 |
+| `GET /api/captures` | 本機相冊：照片 + 錄影，時間倒序 |
+| `GET /api/camera-album` | 相機端相簿：照片能力、事件、錄影一次給齊 |
+| `GET /api/photos` · `GET/DELETE /api/photos/<檔名>` | 本機照片列表／檢視／刪除 |
+| `GET/DELETE /api/records/<檔名>` | 本機錄影片段檢視／刪除 |
+| `GET /api/camera-photo/<檔名>` | 代理相機上的照片（給支援照片 API 的韌體） |
 | `GET /api/media/<檔名>` | 播放相機上的錄影（支援 Range） |
 | `POST /api/download` `{"names":[...]}` | 把相機檔案下載到本機 `downloads/` |
 
@@ -116,6 +121,24 @@ ddpai reboot -y            # 重啟相機
 | 下載 | 140 MB / 段實測 45 秒（約 3.1 MB/s） |
 | 直播 | `rtsp://193.168.0.1:554/liveRTSP/av4` → 1280×720 H.264 + pcm_alaw |
 | 瀏覽器播放 | 正常，可拖時間軸，畫質 2560×1440 |
+| 抓拍照片（SD 卡） | **不存在** —— 詳見下方「為什麼相機裡沒有抓拍照片」 |
+
+### 為什麼相機裡沒有抓拍照片（實測）
+
+使用者的直覺是「行車紀錄儀應該有抓拍的照片」，於是把所有可能路徑都試了一輪：
+
+| 探測 | 結果 |
+| --- | --- |
+| 24 支照片清單 cmd（`APP_PhotoListReq`、`API_GetPhotoList`、`APP_AlbumListReq`、`API_GetThumbList`…） | 全部回 `0x7700003C`（不支援） |
+| 10 支拍照 cmd（`API_CameraCapture`、`APP_Snapshot`、`APP_TakePhoto`…） | 全部不支援（`0x7700003C` / `0x77000045`） |
+| `APP_PlaybackListReq` 全部 166 個檔案副檔名 | **100% `.mp4`**，零張 JPG |
+| 猜 6 種 JPG 路徑（含 `/DCIM/PHOTO/`） | 全部 404 |
+| 事件錄影的 JPG 兄弟檔 | 404（事件本身是 72 MB 的 mp4，可正常下載） |
+| HTTP 目錄列表（`/`、`/DCIM/`、`/photo/`…） | 一律回 API 錯誤 JSON，無目錄瀏覽 |
+
+結論：**這個韌體（Mini3 Pro v7.1.0.48）不把抓拍照片寫進 SD 卡**。DDPAI App 裡的「抓拍」是從即時影像串流取 frame 存到手機，跟本專案「拍照」按鈕的做法完全一樣 —— 所以照片存在電腦端相冊（`photos/`），不在相機上。
+
+程式仍保留自動偵測（`Camera.photo_support()`），若哪天換成支援照片 API 的機型／韌體，「相機照片」分頁會自動出現縮圖牆。
 
 實測踩到並已修正的四個韌體特性：
 

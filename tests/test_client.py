@@ -142,6 +142,25 @@ def test_doctor_report(camera):
     assert report["commands"]["API_GetBaseInfo"]["ok"] is True
 
 
+def test_photo_capability_reports_unsupported(camera):
+    """假相機模擬「沒有照片 API」的韌體（與真實 Mini3 Pro 一致）。"""
+    cam, _ = camera
+    cap = cam.photo_support()
+    assert cap["supported"] is False
+    assert "照片" in cap["reason"]
+    # 第二次呼叫要用快取，不再打相機
+    assert cam.photo_support() is cap
+
+
+def test_camera_album_bundles_events_and_videos(camera):
+    cam, _ = camera
+    album = cam.camera_album()
+    assert album["photos"]["supported"] is False
+    assert album["events"]["count"] == 1
+    assert album["videos"]["count"] == 3
+    assert album["videos"]["items"][0]["basename"].endswith(".MP4")
+
+
 # ── 發現 ───────────────────────────────────────────────────────
 def test_discovery_finds_fake_camera():
     with FakeCamera(mode="plain") as fake:

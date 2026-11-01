@@ -363,6 +363,33 @@ def api_photo_delete(name: str) -> Any:
     return ok({"deleted": name})
 
 
+@app.get("/api/camera-album")
+def api_camera_album(limit: int = Query(0, ge=0, le=2000)) -> Any:
+    """相機端相簿：照片（若韌體支援）、事件、錄影，一次給齊。"""
+    try:
+        album = get_camera().camera_album(limit=limit)
+        return ok(album)
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.get("/api/camera-photo/{name:path}")
+def api_camera_photo(name: str) -> Response:
+    """代理相機上的照片（給支援照片 API 的韌體用；本機韌體不會有圖）。"""
+    try:
+        camera = get_camera()
+        upstream = camera.transport.open_stream(name)
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+    if upstream.status_code not in (200, 206):
+        upstream.close()
+        return JSONResponse(status_code=404,
+                            content={"ok": False, "error": f"相機沒有這個檔案（HTTP {upstream.status_code}）"})
+    data = upstream.content
+    upstream.close()
+    return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "max-age=600"})
+
+
 @app.get("/api/captures")
 def api_captures() -> Any:
     """相冊總覽：照片 + 錄影片段（同一個畫面用）。"""

@@ -29,6 +29,21 @@ CMD_EVENTS = {False: "APP_EventListReq", True: "APP_EventListReq_RearCam"}
 CMD_STORAGE = ("API_GetStorageInfo", "API_GetCamWifiCapacity", "API_GetBaseInfo")
 CMD_BASE_INFO = ("API_GetBaseInfo", "G_DEV_TYPE")
 
+# 相機端「照片清單」候選命令。實測 Mini3 Pro 全部不支援（0x7700003C），
+# 但其他世代/韌體可能有一支可用，所以保留探測。
+PHOTO_LIST_CMDS = (
+    "APP_PhotoListReq",
+    "API_PhotoListReq",
+    "API_GetPhotoList",
+    "APP_AlbumListReq",
+    "API_AlbumListReq",
+    "APP_PicListReq",
+    "API_PicListReq",
+    "APP_PhotoEventListReq",
+    "API_GetThumbList",
+    "APP_ThumbListReq",
+)
+
 DEFAULT_PASSWORD = os.environ.get("DDPAI_PASSWORD", "")
 CHUNK = 64 * 1024
 
@@ -55,6 +70,7 @@ class Camera:
         self.timeout = timeout
         self.password = password or DEFAULT_PASSWORD
         self._size_scale: Optional[int] = None
+        self._photo_cap: Optional[Dict[str, Any]] = None
         if transport is not None:
             self.transport = transport
         else:
@@ -184,6 +200,74 @@ class Camera:
         payload = self.transport.request("APP_ParkingEventListReq")
         rows = find_list(payload, keys=("event", "events", "file", "list", "data"))
         return [CameraFile.from_raw(row, kind="parking") for row in rows if row]
+
+    # ── 相機端相簿 ──────────────────────────────────────────────
+    def photo_support(self) -> Dict[str, Any]:
+        """探測這台韌體有沒有「相機內建照片」。
+
+        實測 Mini3 Pro v7.1.0.48：24 支照片清單 cmd 全部回
+        `0x7700003C`（不支援），播放清單 166 個檔案全是 .mp4，
+        SD 卡上確實沒有相片。DDPAI App 的「抓拍」是從即時影像取 frame
+        存到手機，不寫 SD 卡 —— 所以本專案的拍照也存到電腦相冊。
+        """
+        if self._photo_cap is not None:
+            return self._photo_cap
+
+        for cmd in PHOTO_LIST_CMDS:
+            try:
+                payload = self.transport.request(cmd, timeout=min(self.timeout, 5.0))
+            except TransportError:
+                continue
+            code = errcode(payload)
+            if code not in (0, None):
+                continue
+            items = [
+                CameraFile.from_raw(row, kind="photo")
+                for row in find_list(payload)
+            ]
+            items = [item for item in items if item.name]
+            self._photo_cap = {
+                "supported": True,
+                "cmd": cmd,
+                "items": items,
+                "reason": "",
+            }
+            return self._photo_cap
+
+        self._photo_cap = {
+            "supported": False,
+            "cmd": None,
+            "items": [],
+            "reason": "此韌體沒有照片清單 API（回 0x7700003C 不支援），"
+                      "SD 卡上只有錄影檔；抓拍由即時影像擷取，存在電腦端相冊",
+        }
+        return self._photo_cap
+
+    def camera_album(self, limit: int = 0) -> Dict[str, Any]:
+        """相機端可看的媒體：照片（若支援）、事件、錄影。"""
+        photos = self.photo_support()
+        events = self.events()
+        videos = self.files()
+
+        def trim(items: List[CameraFile]) -> List[CameraFile]:
+            return items[:limit] if limit else items
+
+        return {
+            "photos": {
+                "supported": photos["supported"],
+                "reason": photos["reason"],
+                "count": len(photos["items"]),
+                "items": [item.to_dict() for item in trim(photos["items"])],
+            },
+            "events": {
+                "count": len(events),
+                "items": [item.to_dict() for item in trim(events)],
+            },
+            "videos": {
+                "count": len(videos),
+                "items": [item.to_dict() for item in trim(videos)],
+            },
+        }
 
     # ── 下載 ────────────────────────────────────────────────────
     def download(

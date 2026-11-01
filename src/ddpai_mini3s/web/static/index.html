@@ -93,6 +93,17 @@
   /* 相冊 */
   .galhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
   .galhead .meta { color: var(--dim); font-size: 12.5px; }
+  .sourceswitch { display: flex; gap: 5px; flex-wrap: wrap; }
+  .src {
+    padding: 5px 11px; font-size: 13px; border-radius: 8px;
+    background: transparent; color: var(--dim); border: 1px solid var(--line);
+  }
+  .src.active { background: #10293a; color: #bfe9ff; border-color: #1b5a7d; }
+  .notice {
+    margin: 0 0 12px; padding: 10px 13px; border-radius: 10px; font-size: 13.5px;
+    background: #241d0d; border: 1px solid #4a3a12; color: #f3dfa8;
+  }
+  .notice code { color: #ffd479; }
   .galgrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
   .thumb {
     position: relative; border-radius: 10px; overflow: hidden;
@@ -197,6 +208,17 @@
   </div>
 
   <section class="card">
+    <div class="galhead">
+      <strong>相冊</strong>
+      <span class="sourceswitch" id="src-switch">
+        <button class="src active" data-src="local">我的抓拍</button>
+        <button class="src" data-src="camera-photos">相機照片</button>
+        <button class="src" data-src="camera-events">相機事件</button>
+        <button class="src" data-src="camera-videos">相機錄影</button>
+      </span>
+      <span class="grow"></span>
+      <span class="meta" id="gal-meta"></span>
+    </div>
     <div id="pane-gallery"></div>
     <div id="pane-files" hidden></div>
     <div id="pane-events" hidden></div>
@@ -229,7 +251,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { tab: "gallery", files: [], events: [], current: null, captures: [] };
+const state = { tab: "gallery", src: "local", files: [], events: [], current: null, captures: [] };
 
 function banner(message, kind = "error") {
   const el = $("banner");
@@ -469,22 +491,29 @@ async function download(names) {
 }
 
 async function loadGallery() {
+  const src = state.src || "local";
+  $("gal-meta").textContent = "";
+  if (src === "local") return loadLocalCaptures();
+  return loadCameraAlbum(src);
+}
+
+async function loadLocalCaptures() {
   $("pane-gallery").innerHTML = '<div class="empty">讀取中…</div>';
   try {
     const data = await api("/api/captures");
     state.captures = data.items || [];
-    if (!state.captures.length) {
+    $("gal-meta").innerHTML = `照片 ${data.photo_count} 張 · 影片 ${data.video_count} 段`;
+    if (!data.items.length) {
       $("pane-gallery").innerHTML =
-        `<div class="empty">相冊還是空的<br>按上面「拍照」或「錄 10 秒」，內容會自動存到這裡<br>
+        `<div class="empty">還沒有抓拍<br>按上面「拍照」或「錄 10 秒」，內容會自動存到這裡<br>
          <code>${data.photo_dir}</code></div>`;
       return;
     }
-    const cards = state.captures.map(item => {
+    const cards = data.items.map(item => {
       const isPhoto = item.kind === "photo";
       const media = isPhoto
         ? `<img src="${item.url}?t=${item.mtime}" alt="${item.name}" loading="lazy">`
         : `<video src="${item.url}#t=0.5" preload="metadata" muted playsinline></video>`;
-      // 影片畫面上已經有燒錄的 OSD 時間，左下角就不再重複顯示時間
       const cap = isPhoto
         ? `<div class="cap"><span>${item.time}</span><span class="sz">${item.size}</span></div>`
         : `<div class="cap right"><span class="sz">${item.size}</span></div>`;
@@ -496,23 +525,73 @@ async function loadGallery() {
         ${cap}
       </div>`;
     }).join("");
-    $("pane-gallery").innerHTML =
-      `<div class="galhead">
-         <strong>本地相冊</strong>
-         <span class="meta">照片 ${data.photo_count} 張 · 影片 ${data.video_count} 段</span>
-         <span class="grow"></span>
-         <span class="meta"><code>${data.photo_dir}</code></span>
-       </div>
-       <div class="galgrid">${cards}</div>`;
+    $("pane-gallery").innerHTML = `<div class="galgrid">${cards}</div>`;
   } catch (err) {
     $("pane-gallery").innerHTML = '<div class="empty">讀取相冊失敗</div>';
     banner("讀取相冊失敗：" + err.message);
   }
 }
 
-function openPhoto(name) {
+async function loadCameraAlbum(src) {
+  $("pane-gallery").innerHTML = '<div class="empty">讀取相機中…</div>';
+  try {
+    const album = await api("/api/camera-album");
+    if (src === "camera-photos") {
+      if (!album.photos.supported) {
+        $("gal-meta").textContent = "0 張";
+        $("pane-gallery").innerHTML =
+          `<div class="notice">這台相機的韌體不儲存抓拍照片。</div>
+           <div class="empty">${album.photos.reason}<br><br>
+           要照片請用上面「拍照」—— 會直接從即時畫面擷取並存到「我的抓拍」（與 DDPAI App 相同做法）。</div>`;
+        return;
+      }
+      $("gal-meta").textContent = `${album.photos.count} 張`;
+      $("pane-gallery").innerHTML = cameraCards(album.photos.items, "photo");
+      return;
+    }
+
+    const isEvents = src === "camera-events";
+    const rows = isEvents ? album.events.items : album.videos.items;
+    $("gal-meta").textContent = isEvents ? `${album.events.count} 段` : `${album.videos.count} 段`;
+    if (!rows.length) {
+      $("pane-gallery").innerHTML = `<div class="empty">${isEvents ? "沒有事件錄影" : "相機上沒有錄影"}</div>`;
+      return;
+    }
+    // 相機上的檔案量大，用表格（可下載到本機），不用縮圖牆
+    const head = `<tr><th>檔名</th><th>開始時間</th><th class="num">長度</th><th class="num">大小</th><th class="num">操作</th></tr>`;
+    const body = rows.map(f => `
+      <tr>
+        <td class="name">${f.basename}</td>
+        <td>${f.start || "—"}</td>
+        <td class="num">${fmtDur(f.duration)}</td>
+        <td class="num">${fmtSize(f.size)}</td>
+        <td class="num"><span class="actions">
+          <button data-play="${encodeURIComponent(f.name)}">播放</button>
+          <button data-dl="${encodeURIComponent(f.name)}">下載</button>
+        </span></td>
+      </tr>`).join("");
+    $("pane-gallery").innerHTML = `<table>${head}${body}</table>`;
+  } catch (err) {
+    $("pane-gallery").innerHTML = '<div class="empty">讀不到相機相簿（相機可能未連線）</div>';
+    $("gal-meta").textContent = "";
+    banner("讀取相機相簿失敗：" + err.message);
+  }
+}
+
+function cameraCards(items, kind) {
+  if (!items.length) return '<div class="empty">沒有照片</div>';
+  const cards = items.map(item => `
+    <div class="thumb" data-open="camera-photo:${encodeURIComponent(item.name)}">
+      <img src="/api/camera-photo/${encodeURIComponent(item.basename)}" alt="${item.basename}" loading="lazy">
+      <div class="cap"><span>${item.start || ""}</span><span class="sz">${fmtSize(item.size)}</span></div>
+    </div>`).join("");
+  return `<div class="galgrid">${cards}</div>`;
+}
+
+function openPhoto(name, url) {
   $("viewer-name").textContent = name;
-  $("viewer-img").src = `/api/photos/${name}`;
+  $("viewer-img").src = url || `/api/photos/${name}`;
+  $("viewer").dataset.src = url ? "camera" : "local";
   $("viewer").showModal();
 }
 
@@ -541,6 +620,13 @@ function renderTabs() {
 }
 
 document.addEventListener("click", (event) => {
+  const srcBtn = event.target.closest(".src");
+  if (srcBtn) {
+    state.src = srcBtn.dataset.src;
+    document.querySelectorAll(".src").forEach(b => b.classList.toggle("active", b === srcBtn));
+    state.tab = "gallery"; renderTabs();
+    return;
+  }
   const delBtn = event.target.closest("[data-del]");
   if (delBtn) {
     event.stopPropagation();
@@ -553,6 +639,7 @@ document.addEventListener("click", (event) => {
     const [kind, name] = openEl.dataset.open.split(":");
     const decoded = decodeURIComponent(name);
     if (kind === "photo") openPhoto(decoded);
+    else if (kind === "camera-photo") openPhoto(decoded, `/api/camera-photo/${encodeURIComponent(decoded)}`);
     else play("/api/records/" + decoded);
     return;
   }
@@ -576,8 +663,10 @@ $("viewer-close").onclick = () => { $("viewer-img").removeAttribute("src"); $("v
 $("viewer-dl").onclick = () => {
   const name = $("viewer-name").textContent;
   if (!name) return;
+  const fromCamera = $("viewer").dataset.src === "camera";
   const a = document.createElement("a");
-  a.href = `/api/photos/${name}`; a.download = name;
+  a.href = fromCamera ? `/api/camera-photo/${encodeURIComponent(name)}` : `/api/photos/${name}`;
+  a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
 };
 $("player-dl").onclick = () => { if (state.current) download([state.current]); };
