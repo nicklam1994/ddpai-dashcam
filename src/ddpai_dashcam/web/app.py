@@ -432,6 +432,46 @@ def api_photo_in_folder(folder: str, name: str) -> Response:
     return FileResponse(path, media_type="image/jpeg")
 
 
+@app.delete("/api/camera-media/{name:path}")
+def api_camera_delete(name: str) -> Any:
+    """刪除相機上的檔案（影片或照片）。"""
+    try:
+        camera = get_camera()
+        result = camera.delete_files([name])
+        return ok(result)
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.post("/api/lock")
+def api_lock(payload: Dict[str, Any] = Body(...)) -> Any:
+    """鎖定／解鎖影片（鎖住的片段不會被循環錄影覆蓋）。"""
+    name = str((payload or {}).get("name", "")).strip()
+    if not name:
+        return fail(ValueError("未指定檔名"), status=400)
+    locked = bool((payload or {}).get("locked", True))
+    try:
+        return ok(get_camera().lock_file(name, locked=locked))
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.get("/api/locked")
+def api_locked() -> Any:
+    try:
+        return ok([f.to_dict() for f in get_camera().locked_files()])
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
+@app.get("/api/mailbox")
+def api_mailbox() -> Any:
+    try:
+        return ok(get_camera().mailbox())
+    except Exception as exc:  # noqa: BLE001
+        return fail(exc)
+
+
 @app.get("/api/captures")
 def api_captures() -> Any:
     """相冊總覽：照片 + 錄影片段（同一個畫面用）。"""

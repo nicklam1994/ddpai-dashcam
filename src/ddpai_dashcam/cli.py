@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from . import __version__, discovery
 from .client import Camera, CameraError, CameraUnreachable
 from .models import CameraFile, human_duration, human_size
-from .transport import STRATEGIES
+from .transport import STRATEGIES, TransportError
 
 LOG = logging.getLogger("ddpai")
 
@@ -312,6 +312,56 @@ def cmd_raw(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mailbox(args: argparse.Namespace) -> int:
+    with make_camera(args) as cam:
+        messages = cam.mailbox()
+    if args.json:
+        print(json.dumps(messages, ensure_ascii=False, indent=2))
+        return 0
+    header("Mailbox 訊息")
+    if not messages:
+        print(paint("  （沒有新訊息）", Palette.DIM))
+        return 0
+    for item in messages:
+        print(f"  {paint(str(item.get('msgid')), Palette.CYAN)}  {json.dumps(item.get('data'), ensure_ascii=False)}")
+    return 0
+
+
+def cmd_photos(args: argparse.Namespace) -> int:
+    with make_camera(args) as cam:
+        photos = cam.event_photos()
+    if args.json:
+        print(json.dumps([p.to_dict() for p in photos], ensure_ascii=False, indent=2))
+        return 0
+    _print_files(photos, "相機照片（事件縮圖，唯一可列舉的圖片）")
+    print(paint("  提示：抓拍照片沒有清單 API，用 `ddpai capture` 產生並立即下載。", Palette.DIM))
+    return 0
+
+
+def cmd_delete(args: argparse.Namespace) -> int:
+    names = list(args.names)
+    if not args.yes:
+        print("  將刪除相機上的：")
+        for name in names:
+            print(f"    {name}")
+        answer = input("  確定？[y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print(paint("  已取消", Palette.DIM))
+            return 0
+    with make_camera(args) as cam:
+        result = cam.delete_files(names)
+    print(paint(f"✓ 已刪除 {result['count']} 個檔案", Palette.GREEN))
+    return 0
+
+
+def cmd_lock(args: argparse.Namespace) -> int:
+    with make_camera(args) as cam:
+        result = cam.lock_file(args.name, locked=not args.unlock)
+    state = "解鎖" if args.unlock else "鎖定"
+    print(paint(f"✓ 已{state} {result['filename']}", Palette.GREEN))
+    return 0
+
+
 def cmd_capture(args: argparse.Namespace) -> int:
     with make_camera(args) as cam:
         if not cam.login(args.user, args.password or "admin"):
@@ -429,6 +479,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-download", action="store_true", help="只抓拍不下載")
     p.set_defaults(func=cmd_capture)
 
+    p = sub.add_parser("photos", parents=[common], help="列出相機上的照片（事件縮圖）")
+    p.set_defaults(func=cmd_photos)
+
+    p = sub.add_parser("mailbox", parents=[common], help="讀 mailbox 訊息（新檔案／刪除通知）")
+    p.set_defaults(func=cmd_mailbox)
+
+    p = sub.add_parser("delete", parents=[common], help="刪除相機上的檔案")
+    p.add_argument("names", nargs="+", help="檔名（可多個）")
+    p.add_argument("-y", "--yes", action="store_true", help="不詢問")
+    p.set_defaults(func=cmd_delete)
+
+    p = sub.add_parser("lock", parents=[common], help="鎖定影片（不會被循環錄影覆蓋）")
+    p.add_argument("name", help="檔名")
+    p.add_argument("--unlock", action="store_true", help="改為解鎖")
+    p.set_defaults(func=cmd_lock)
+
     p = sub.add_parser("serve", help="啟動網頁儀表板")
     p.add_argument("--bind", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8766)
@@ -452,6 +518,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return int(args.func(args) or 0)
     except CameraError as exc:
         print(paint(f"✗ {exc}", Palette.RED))
+        return 1
+    except TransportError as exc:
+        print(paint(f"✗ 相機通訊失敗：{exc}", Palette.RED))
+        print(paint("  提示：相機只允許一個客戶端連線；先停掉網頁服務或其他連線再試。", Palette.DIM))
         return 1
     except KeyboardInterrupt:
         print()

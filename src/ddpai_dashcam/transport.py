@@ -348,6 +348,44 @@ class Transport:
         self._try_logon()
         return self.logged_in
 
+    def post_json(self, cmd: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """POST JSON body 到 cmd.cgi，成功回傳解析後的 JSON（失敗回 None）。
+
+        控制類命令（登入、刪除、鎖檔、抓拍）在這款韌體上只認這種形狀：
+        GET + query 參數一律回 `WEB_E_ERR_WRONG_CGI_REQUEST`。
+        """
+        if self.strategy is None:
+            self.detect()
+        strategy = self.strategy
+        if strategy is None:
+            return None
+        url = self.base_url + strategy.path
+        headers = strategy.headers(self.session_token)
+        headers["Content-Type"] = "application/json"
+        if self.session_token:
+            headers["sessionid"] = self.session_token
+        try:
+            resp = self.session.post(
+                url, params={"cmd": cmd},
+                data=json.dumps(payload, separators=(",", ":")),
+                headers=headers, timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            log.debug("%s POST 失敗：%s", cmd, exc)
+            return None
+
+        try:
+            parsed = json.loads(resp.text or "{}")
+        except (json.JSONDecodeError, ValueError):
+            return None
+        from .parser import errcode
+
+        code = errcode(parsed)
+        log.debug("%s → errcode=%s", cmd, code)
+        if code not in (0, None):
+            raise TransportError(f"{cmd} 回錯誤碼 {code}")
+        return parsed if isinstance(parsed, dict) else {}
+
     def probe_matrix(self, commands: Tuple[str, ...] = PROBE_COMMANDS) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         for strategy in STRATEGIES:

@@ -387,6 +387,41 @@ class Camera:
                 photos.append(item)
         return photos
 
+    # ── 刪除 / 鎖檔（需要登入）──────────────────────────────────
+    def delete_files(self, names: List[str]) -> Dict[str, Any]:
+        """刪除相機上的檔案（影片或照片）。
+
+        APK 的 payload 是 `{"file": [name, ...]}`，POST JSON body。
+        """
+        if not names:
+            raise CameraError("沒有指定要刪除的檔案")
+        if not self.transport.logged_in:
+            self.login()
+        payload = {"file": [str(n).lstrip("/") for n in names]}
+        self.transport.post_json("APP_DeleteEvent", payload)
+        return {"deleted": payload["file"], "count": len(payload["file"])}
+
+    def lock_file(self, name: str, locked: bool = True) -> Dict[str, Any]:
+        """鎖定／解鎖影片，鎖住的片段不會被循環錄影覆蓋。
+
+        APK 的 payload：`{"switch": "lock"|"unlock", "filename": <name>}`。
+        對的士司機最實用的功能 —— 事故片段先鎖住再下載。
+        """
+        if not self.transport.logged_in:
+            self.login()
+        payload = {"switch": "lock" if locked else "unlock",
+                   "filename": str(name).lstrip("/")}
+        self.transport.post_json("API_SetLockFile", payload)
+        return {"filename": payload["filename"], "locked": locked}
+
+    def locked_files(self) -> List[CameraFile]:
+        try:
+            payload = self.transport.request("APP_LockedListReq")
+        except TransportError:
+            return []
+        rows = find_list(payload, keys=("file", "files", "list", "data"))
+        return [f for f in (CameraFile.from_raw(r) for r in rows) if f.name]
+
     # ── 下載 ────────────────────────────────────────────────────
     def download(
         self,
